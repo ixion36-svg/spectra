@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { csvCell, findingsToCsv } from './export'
+import { hostOf } from './engine'
 import { findingsToSarif, sarifRuleId } from './sarif'
 import { normalizeSeverity, findingPayloadSchema } from '../types'
 import type { Finding, Scan } from '../types'
@@ -34,6 +35,19 @@ describe('findingsToCsv', () => {
     const [header, row] = csv.split('\n')
     expect(header.startsWith('severity,title,asset')).toBe(true)
     expect(row).toContain('"\'=HYPERLINK(""evil"")"')
+  })
+})
+
+describe('hostOf (simulator host extraction)', () => {
+  it('extracts hostname from a URL (not "https:")', () => {
+    expect(hostOf('https://example.com')).toBe('example.com')
+    expect(hostOf('https://example.com/path?q=1')).toBe('example.com')
+    expect(hostOf('http://10.10.14.7:8080/x')).toBe('10.10.14.7')
+  })
+  it('passes through bare hosts and host/path', () => {
+    expect(hostOf('10.10.14.7')).toBe('10.10.14.7')
+    expect(hostOf('example.com/app')).toBe('example.com')
+    expect(hostOf('  example.com  ')).toBe('example.com')
   })
 })
 

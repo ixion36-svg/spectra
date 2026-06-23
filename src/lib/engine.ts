@@ -4,6 +4,19 @@ function rid(prefix: string): string {
   return prefix + Math.random().toString(36).slice(2, 11)
 }
 
+/** Extract a bare hostname from a raw target (URL, host, or host/path). */
+export function hostOf(rawTarget: string): string {
+  const target = rawTarget.trim()
+  if (target.includes('://')) {
+    try {
+      return new URL(target).hostname
+    } catch {
+      /* fall through */
+    }
+  }
+  return target.split('/')[0]
+}
+
 const TEMPLATES = [
   { title: 'Outdated OpenSSL - Heartbleed risk', cwe: 'CWE-119', cvss: 7.5, tags: ['network', 'crypto'], rec: 'Upgrade OpenSSL to 1.0.1g+ or latest LTS. Disable affected ciphers.' },
   { title: 'Exposed sensitive .env file', cwe: 'CWE-538', cvss: 7.5, tags: ['web', 'misconfig'], rec: 'Remove .env from web root. Use secrets manager + proper .gitignore.' },
@@ -47,7 +60,7 @@ export class SpectraEngine {
       targets.forEach((rawTarget, tIdx) => {
         const target = rawTarget.trim()
         if (!target) return
-        const baseHost = target.includes('://') ? new URL(target).hostname : target.split('/')[0]
+        const baseHost = hostOf(target)
         const isWeb = profile.includes('Web') || profile.includes('Deep') || target.includes('http')
 
         if (step % 3 === 1) {
@@ -72,7 +85,7 @@ export class SpectraEngine {
 
     this.intervals.push(setInterval(tick, 260))
     setTimeout(() => {
-      if (targets[0]) this.emitFinding(targets[0].trim().split('/')[0], 443, 'https', scanId, profile)
+      if (targets[0]) this.emitFinding(hostOf(targets[0]), 443, 'https', scanId, profile)
     }, 420)
   }
 
