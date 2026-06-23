@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { format } from 'date-fns'
-import type { Finding, Severity } from '../types'
+import { type Finding, type Severity, type TriageStatus, TRIAGE_LABELS, triageOf } from '../types'
 
 const ROW_HEIGHT = 41
 
@@ -9,11 +9,15 @@ export function SeverityBadge({ sev }: { sev: Severity }) {
   return <span className={`badge sev-${sev}`}>{sev}</span>
 }
 
+export function StatusPill({ status }: { status: TriageStatus }) {
+  return <span className={`status-pill status-${status}`}>{TRIAGE_LABELS[status]}</span>
+}
+
 // Virtualized findings list — only the visible rows are mounted, so a scan with
 // tens of thousands of findings stays smooth. Layout is a CSS grid so rows align
 // without the measurement pitfalls of virtualizing a native <table>.
 const GRID = 'grid items-center gap-3 px-3'
-const COLS = 'minmax(90px,0.6fr) minmax(180px,2fr) minmax(120px,1.2fr) 90px 56px 70px 110px'
+const COLS = 'minmax(90px,0.6fr) minmax(170px,2fr) minmax(110px,1.2fr) 90px 52px 64px 110px 96px'
 
 export function FindingsTable({
   findings,
@@ -43,6 +47,7 @@ export function FindingsTable({
         <div>Port / Service</div>
         <div>CVSS</div>
         <div>Exploit %</div>
+        <div>Status</div>
         <div>Discovered</div>
       </div>
 
@@ -82,6 +87,7 @@ export function FindingsTable({
                       </span>
                     )}
                   </div>
+                  <div><StatusPill status={triageOf(f)} /></div>
                   <div className="text-xs text-[#52525b] font-mono">{format(new Date(f.discoveredAt), 'HH:mm:ss')}</div>
                 </div>
               )

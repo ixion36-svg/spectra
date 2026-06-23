@@ -71,8 +71,29 @@ export function cancelRealScan(scanId: string): Promise<void> {
 
 /** Generate text via the local Ollama model, proxied through Rust (no CORS,
  *  no external connect-src). Returns the model's response string. */
-export function ollamaGenerate(prompt: string, model = 'llama3.2'): Promise<string> {
-  return invoke<string>('ollama_generate', { prompt, model })
+export function ollamaGenerate(prompt: string, model: string, endpoint: string): Promise<string> {
+  return invoke<string>('ollama_generate', { prompt, model, endpoint })
+}
+
+/** List models installed in the local Ollama instance (proxied through Rust). */
+export function ollamaModels(endpoint: string): Promise<string[]> {
+  return invoke<string[]>('ollama_models', { endpoint })
+}
+
+/** Stream a generation, invoking onToken for each chunk as it arrives.
+ *  Resolves when the stream completes. */
+export async function ollamaGenerateStream(
+  prompt: string,
+  model: string,
+  endpoint: string,
+  onToken: (token: string) => void,
+): Promise<void> {
+  await ensureApi()
+  if (!invokeFn) throw new Error('ollama_generate_stream called outside a Tauri webview')
+  const core = await import('@tauri-apps/api/core')
+  const channel = new core.Channel<string>()
+  channel.onmessage = onToken
+  await invokeFn('ollama_generate_stream', { prompt, model, endpoint, onToken: channel })
 }
 
 export async function listenScanEvents(handler: (e: ScanEvent) => void): Promise<() => void> {

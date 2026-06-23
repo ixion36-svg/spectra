@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -563,11 +564,22 @@ async fn http_probe(target: String) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Normalise a user-supplied Ollama endpoint: trim, require http(s), strip a
+/// trailing slash. Returns the base URL (without a path).
+fn normalize_ollama_endpoint(endpoint: &str) -> Result<String, String> {
+    let e = endpoint.trim().trim_end_matches('/');
+    if !(e.starts_with("http://") || e.starts_with("https://")) {
+        return Err("Ollama endpoint must start with http:// or https://".into());
+    }
+    Ok(e.to_string())
+}
+
 /// Proxy a generation request to the local Ollama instance from Rust.
 /// This avoids the webview making a cross-origin fetch (no CORS, and the
 /// Ollama host no longer needs to be allow-listed in the CSP connect-src).
 #[tauri::command]
-async fn ollama_generate(prompt: String, model: String) -> Result<String, String> {
+async fn ollama_generate(prompt: String, model: String, endpoint: String) -> Result<String, String> {
+    let base = normalize_ollama_endpoint(&endpoint)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
@@ -581,7 +593,7 @@ async fn ollama_generate(prompt: String, model: String) -> Result<String, String
     });
 
     let resp = client
-        .post("http://127.0.0.1:11434/api/generate")
+        .post(format!("{}/api/generate", base))
         .json(&body)
         .send()
         .await
@@ -603,6 +615,95 @@ async fn ollama_generate(prompt: String, model: String) -> Result<String, String
         return Err("Ollama returned an empty response".into());
     }
     Ok(reply)
+}
+
+/// Stream a generation from Ollama, emitting each token to the frontend via a
+/// Tauri Channel as it arrives. Returns once the stream is complete.
+#[tauri::command]
+async fn ollama_generate_stream(
+    prompt: String,
+    model: String,
+    endpoint: String,
+    on_token: Channel<String>,
+) -> Result<(), String> {
+    let base = normalize_ollama_endpoint(&endpoint)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": true,
+        "options": { "temperature": 0.3 }
+    });
+
+    let mut resp = client
+        .post(format!("{}/api/generate", base))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ollama not reachable: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Ollama returned HTTP {}", resp.status().as_u16()));
+    }
+
+    // Ollama streams newline-delimited JSON. Buffer bytes and decode only
+    // complete lines, so a multi-byte char split across chunks is never mangled.
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        buf.extend_from_slice(&chunk);
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(tok) = val.get("response").and_then(|v| v.as_str()) {
+                    if !tok.is_empty() {
+                        let _ = on_token.send(tok.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// List models installed in the local Ollama instance (GET /api/tags).
+#[tauri::command]
+async fn ollama_models(endpoint: String) -> Result<Vec<String>, String> {
+    let base = normalize_ollama_endpoint(&endpoint)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .get(format!("{}/api/tags", base))
+        .send()
+        .await
+        .map_err(|e| format!("Ollama not reachable: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Ollama returned HTTP {}", resp.status().as_u16()));
+    }
+
+    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let names = val
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(names)
 }
 
 #[tauri::command]
@@ -699,6 +800,8 @@ pub fn run() {
             tcp_port_scan,
             http_probe,
             ollama_generate,
+            ollama_generate_stream,
+            ollama_models,
             save_scan,
             load_scans,
             cancel_real_scan,
@@ -727,6 +830,14 @@ mod tests {
         assert!(validate_target("").is_err());
         assert!(validate_target("a b").is_err()); // whitespace
         assert!(validate_target("a\nb").is_err()); // control char
+    }
+
+    #[test]
+    fn normalize_ollama_endpoint_trims_and_validates() {
+        assert_eq!(normalize_ollama_endpoint("http://127.0.0.1:11434/").unwrap(), "http://127.0.0.1:11434");
+        assert_eq!(normalize_ollama_endpoint("  https://host:1234  ").unwrap(), "https://host:1234");
+        assert!(normalize_ollama_endpoint("127.0.0.1:11434").is_err()); // missing scheme
+        assert!(normalize_ollama_endpoint("ftp://x").is_err());
     }
 
     #[test]

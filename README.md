@@ -23,13 +23,17 @@
 ✅ **Real native engine (Tauri + Rust)** — implemented:
   - Concurrent pure-Rust TCP connect scanner (semaphore-bounded)
   - External tool orchestration: **Nuclei** (live JSONL → rich findings), **Trivy** (JSON → findings), **Nmap**, with PATH + WinGet auto-detection and per-scan cancellation
+  - **Multi-target** scans (every target gets the full toolchain; completion waits for all jobs to settle)
   - Native HTTP banner/header probe (reqwest)
-  - Local **Ollama** co-pilot, proxied through Rust (no CORS; nothing external in the webview CSP)
-  - File-based scan persistence in the app data dir (survives restarts)  
-✅ Security hardening: strict Content-Security-Policy, least-privilege Tauri capabilities (no shell-plugin surface — process execution is native Rust only), scan-target validation against argument-injection, CSV-export formula-injection guard  
-✅ Tests: Rust unit tests for the Nuclei/Trivy mappers + target validator; Vitest for the export/severity/payload-validation helpers  
+  - Cross-platform process cancellation (taskkill /T on Windows, kill -9 on Unix)
+✅ **Analyst triage** — mark findings Open / Confirmed / False-positive / Triaged, filter by status, and carry it into every export  
+✅ **Local AI co-pilot (Ollama)** — proxied through Rust (no CORS, nothing external in the CSP), **streaming** token-by-token, with a **configurable model + endpoint** and one-click model detection  
+✅ **Exports** — JSON, CSV (formula-injection-safe), Markdown, and **SARIF 2.1** for DefectDojo / GitHub code scanning  
+✅ File-based scan persistence in the app data dir (survives restarts)  
+✅ Security hardening: strict Content-Security-Policy, least-privilege Tauri capabilities (no shell-plugin surface — process execution is native Rust only), scan-target validation against argument-injection  
+✅ Tests: Rust unit tests for the Nuclei/Trivy mappers, target validator, and Ollama-endpoint normalizer; Vitest for export (CSV + SARIF), severity, and payload validation  
 🚧 SQLite-backed durable storage (currently localStorage in browser + JSON files in desktop)  
-🚧 SARIF 2.1 / PDF export, richer correlation, plugin system
+🚧 PDF / HTML executive summary, richer correlation, plugin system
 
 ## Quick Start (right now)
 

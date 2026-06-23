@@ -1,5 +1,6 @@
 import { format } from 'date-fns'
-import type { Finding, Scan } from '../types'
+import { type Finding, type Scan, triageOf } from '../types'
+import { findingsToSarif } from './sarif'
 
 /**
  * Neutralise CSV/Excel formula injection. Scanner findings contain
@@ -25,6 +26,7 @@ const CSV_COLUMNS: { header: string; get: (f: Finding) => unknown }[] = [
   { header: 'cwe', get: (f) => f.cwe ?? '' },
   { header: 'owasp', get: (f) => f.owasp ?? '' },
   { header: 'source', get: (f) => f.source ?? '' },
+  { header: 'status', get: (f) => triageOf(f) },
   { header: 'recommendation', get: (f) => f.recommendation },
 ]
 
@@ -40,6 +42,7 @@ export function findingsToMarkdown(scan: Scan): string {
   md += `## Findings (${scan.findings.length})\n\n`
   scan.findings.forEach((f) => {
     md += `### ${f.severity.toUpperCase()} — ${f.title}\n`
+    md += `**Status:** ${triageOf(f)}\n`
     md += `**Source:** ${f.source || 'unknown'}\n`
     md += `**Asset:** ${f.asset}${f.port ? ':' + f.port : ''} (${f.service || 'unknown'})\n`
     if (f.cve) md += `**CVE:** ${Array.isArray(f.cve) ? f.cve.join(', ') : f.cve}\n`
@@ -52,7 +55,7 @@ export function findingsToMarkdown(scan: Scan): string {
   return md
 }
 
-export type ExportFormat = 'json' | 'csv' | 'md'
+export type ExportFormat = 'json' | 'csv' | 'md' | 'sarif'
 
 export function exportFindings(scan: Scan, fmt: ExportFormat): void {
   let blob: Blob
@@ -64,6 +67,9 @@ export function exportFindings(scan: Scan, fmt: ExportFormat): void {
   } else if (fmt === 'csv') {
     blob = new Blob([findingsToCsv(scan.findings)], { type: 'text/csv' })
     filename += '.csv'
+  } else if (fmt === 'sarif') {
+    blob = new Blob([JSON.stringify(findingsToSarif(scan), null, 2)], { type: 'application/sarif+json' })
+    filename += '.sarif'
   } else {
     blob = new Blob([findingsToMarkdown(scan)], { type: 'text/markdown' })
     filename += '.md'

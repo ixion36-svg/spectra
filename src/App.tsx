@@ -7,16 +7,17 @@ import { toast } from 'sonner'
 
 import {
   type Finding, type Scan, type Severity, type View, type GraphNode, type GraphEdge, type ToolStatus,
-  SEVERITY_ORDER, normalizeSeverity, findingPayloadSchema, progressPayloadSchema,
+  type TriageStatus, SEVERITY_ORDER, normalizeSeverity, findingPayloadSchema, progressPayloadSchema,
+  TRIAGE_STATUSES, TRIAGE_LABELS, triageOf,
 } from './types'
 import { SpectraEngine } from './lib/engine'
 import { exportFindings as exportFindingsFile, type ExportFormat } from './lib/export'
 import {
   isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative,
-  tcpPortScan, runExternalScan, httpProbe, cancelRealScan, ollamaGenerate, listenScanEvents,
+  tcpPortScan, runExternalScan, httpProbe, cancelRealScan, ollamaGenerateStream, ollamaModels as ollamaModelsNative, listenScanEvents,
 } from './lib/tauri'
 import { GraphView } from './components/GraphView'
-import { FindingsTable, SeverityBadge } from './components/FindingsTable'
+import { FindingsTable, SeverityBadge, StatusPill } from './components/FindingsTable'
 import { CommandPalette } from './components/CommandPalette'
 
 const COMMON_PORTS = [22, 80, 443, 445, 3306, 5432, 8080, 8443, 21, 23, 25, 53, 110, 143, 993, 995, 1723, 3389, 5900, 8000]
@@ -47,6 +48,7 @@ function App() {
   const hasSimulated = useMemo(() => !!activeScan?.findings.some((f) => f.source === 'simulator'), [activeScan])
 
   const [severityFilter, setSeverityFilter] = useState<Severity[]>(['critical', 'high', 'medium', 'low', 'info'])
+  const [statusFilter, setStatusFilter] = useState<TriageStatus[]>([...TRIAGE_STATUSES])
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null)
 
@@ -55,6 +57,7 @@ function App() {
     const term = searchTerm.toLowerCase()
     return activeScan.findings
       .filter((f) => severityFilter.includes(f.severity))
+      .filter((f) => statusFilter.includes(triageOf(f)))
       .filter((f) =>
         !term ||
         f.title.toLowerCase().includes(term) ||
@@ -62,7 +65,20 @@ function App() {
         (f.service && f.service.toLowerCase().includes(term)),
       )
       .sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || b.discoveredAt.localeCompare(a.discoveredAt))
-  }, [activeScan, severityFilter, searchTerm])
+  }, [activeScan, severityFilter, statusFilter, searchTerm])
+
+  // Update a finding in place (used by triage controls) and keep the open drawer in sync.
+  const updateFinding = useCallback(
+    (findingId: string, patch: Partial<Finding>) => {
+      setScans((prev) =>
+        prev.map((s) =>
+          s.id === activeScanId ? { ...s, findings: s.findings.map((f) => (f.id === findingId ? { ...f, ...patch } : f)) } : s,
+        ),
+      )
+      setSelectedFinding((sf) => (sf && sf.id === findingId ? { ...sf, ...patch } : sf))
+    },
+    [activeScanId],
+  )
 
   const [graphNodes, setGraphNodes] = useState<GraphNode[]>([])
   const [graphEdges, setGraphEdges] = useState<GraphEdge[]>([])
@@ -72,6 +88,13 @@ function App() {
   ])
   const [aiInput, setAiInput] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
+
+  // Configurable local Ollama (model + endpoint), persisted.
+  const [ollamaModel, setOllamaModel] = useState(() => localStorage.getItem('spectra_ollama_model') || 'llama3.2')
+  const [ollamaEndpoint, setOllamaEndpoint] = useState(() => localStorage.getItem('spectra_ollama_endpoint') || 'http://127.0.0.1:11434')
+  const [availableModels, setAvailableModels] = useState<string[]>([])
+  useEffect(() => { localStorage.setItem('spectra_ollama_model', ollamaModel) }, [ollamaModel])
+  useEffect(() => { localStorage.setItem('spectra_ollama_endpoint', ollamaEndpoint) }, [ollamaEndpoint])
 
   const [realTools, setRealTools] = useState<ToolStatus[]>([])
   const [useRealEngine, setUseRealEngine] = useState(true)
@@ -353,21 +376,60 @@ function App() {
       : 'No active scan data.'
     const prompt = `You are an elite red team / appsec analyst AI embedded in Spectra vulnerability scanner.\n\n${context}\n\nUser question: ${question}\n\nRespond concisely, prioritize real risk, suggest concrete next steps or validation commands. Mention specific CVEs or techniques when relevant. Be direct.`
 
+    // Append an empty assistant placeholder, then stream tokens into it.
+    setAiMessages((m) => [...m, { role: 'assistant', content: '' }])
+    const appendToLast = (tok: string) =>
+      setAiMessages((m) => {
+        const copy = [...m]
+        const i = copy.length - 1
+        copy[i] = { ...copy[i], content: copy[i].content + tok }
+        return copy
+      })
+    const replaceLast = (content: string) =>
+      setAiMessages((m) => {
+        const copy = [...m]
+        copy[copy.length - 1] = { role: 'assistant', content }
+        return copy
+      })
+
+    let streamed = ''
+    const onToken = (tok: string) => {
+      streamed += tok
+      appendToLast(tok)
+    }
+
     try {
-      let reply: string
       if (isTauriEnv) {
-        reply = await ollamaGenerate(prompt) // proxied through Rust — no CORS
+        await ollamaGenerateStream(prompt, ollamaModel, ollamaEndpoint, onToken) // proxied + streamed through Rust
       } else {
-        const res = await fetch('http://127.0.0.1:11434/api/generate', {
+        const res = await fetch(`${ollamaEndpoint}/api/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'llama3.2', prompt, stream: false, options: { temperature: 0.3, num_predict: 380 } }),
+          body: JSON.stringify({ model: ollamaModel, prompt, stream: true, options: { temperature: 0.3 } }),
         })
-        if (!res.ok) throw new Error('Ollama not responding')
-        const data = await res.json()
-        reply = data.response || data.message?.content || 'No response from model.'
+        if (!res.ok || !res.body) throw new Error('Ollama not responding')
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buf = ''
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          let nl: number
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl).trim()
+            buf = buf.slice(nl + 1)
+            if (!line) continue
+            try {
+              const j = JSON.parse(line) as { response?: string }
+              if (j.response) onToken(j.response)
+            } catch {
+              /* ignore partial/non-JSON line */
+            }
+          }
+        }
       }
-      setAiMessages((m) => [...m, { role: 'assistant', content: reply.trim() }])
+      if (!streamed.trim()) throw new Error('empty response')
     } catch {
       // Honest demo fallback — summarizes REAL scan data, never invents findings.
       const f = activeScan?.findings ?? []
@@ -377,7 +439,7 @@ function App() {
       const summary = f.length
         ? `This scan has ${f.length} findings (${crit} critical, ${high} high). Prioritise the highest-severity item${top ? `, e.g. "${top.title}" on ${top.asset}` : ''}, then validate and remediate in severity order.`
         : 'There is no scan data loaded yet. Start a scan, then ask me to prioritise the findings.'
-      setAiMessages((m) => [...m, { role: 'assistant', content: `⚠️ DEMO MODE — no local Ollama model reachable. ${summary}\n\nStart Ollama with a model (e.g. \`ollama pull llama3.2\`) for live AI analysis.` }])
+      replaceLast(`⚠️ DEMO MODE — no local Ollama model reachable. ${summary}\n\nStart Ollama with a model (e.g. \`ollama pull llama3.2\`) for live AI analysis.`)
     } finally {
       setAiLoading(false)
     }
@@ -385,6 +447,30 @@ function App() {
 
   const exportFindings = (fmt: ExportFormat) => {
     if (activeScan) exportFindingsFile(activeScan, fmt)
+  }
+
+  // Query the configured Ollama endpoint for its installed models.
+  const detectModels = async () => {
+    try {
+      let names: string[]
+      if (isTauriEnv) {
+        names = await ollamaModelsNative(ollamaEndpoint)
+      } else {
+        const res = await fetch(`${ollamaEndpoint}/api/tags`)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json()
+        names = ((data.models ?? []) as { name: string }[]).map((m) => m.name)
+      }
+      setAvailableModels(names)
+      if (names.length) {
+        toast.success(`Found ${names.length} model${names.length > 1 ? 's' : ''}`)
+        if (!names.includes(ollamaModel)) setOllamaModel(names[0])
+      } else {
+        toast('No models installed', { description: 'Pull one with `ollama pull llama3.2`.' })
+      }
+    } catch {
+      toast.error('Could not reach Ollama', { description: ollamaEndpoint })
+    }
   }
 
   // Keyboard: Cmd/Ctrl+K → palette; '/' → new scan; Esc → close drawer
@@ -609,10 +695,11 @@ function App() {
                   <button onClick={() => exportFindings('json')} className="btn btn-ghost text-xs"><Download size={14} /> JSON</button>
                   <button onClick={() => exportFindings('csv')} className="btn btn-ghost text-xs"><Download size={14} /> CSV</button>
                   <button onClick={() => exportFindings('md')} className="btn btn-ghost text-xs"><Download size={14} /> Markdown</button>
+                  <button onClick={() => exportFindings('sarif')} className="btn btn-ghost text-xs"><Download size={14} /> SARIF</button>
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-2 mb-3">
+              <div className="flex flex-wrap items-center gap-2 mb-3">
                 {(['critical', 'high', 'medium', 'low', 'info'] as const).map((s) => (
                   <button
                     key={s}
@@ -620,6 +707,17 @@ function App() {
                     className={`badge sev-${s} cursor-pointer ${!severityFilter.includes(s) ? 'opacity-40 line-through' : ''}`}
                   >
                     {s}
+                  </button>
+                ))}
+                <span className="w-px h-4 bg-[#24262f] mx-1" />
+                {TRIAGE_STATUSES.map((st) => (
+                  <button
+                    key={st}
+                    onClick={() => setStatusFilter((prev) => (prev.includes(st) ? prev.filter((x) => x !== st) : [...prev, st]))}
+                    className={`status-pill status-${st} is-button ${statusFilter.includes(st) ? 'active' : ''}`}
+                    title={`Toggle ${TRIAGE_LABELS[st]}`}
+                  >
+                    {TRIAGE_LABELS[st]}
                   </button>
                 ))}
                 <input className="input w-64 ml-auto text-sm h-8" placeholder="Filter by asset, title, service..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
@@ -630,9 +728,24 @@ function App() {
               {selectedFinding && (
                 <div className="fixed right-0 top-14 bottom-0 w-[440px] border-l border-[#24262f] bg-[#12141b] p-6 overflow-auto z-50 shadow-2xl">
                   <button onClick={() => setSelectedFinding(null)} className="absolute top-4 right-4 text-[#71717a]"><X /></button>
-                  <div className="mb-3"><SeverityBadge sev={selectedFinding.severity} /></div>
+                  <div className="mb-3 flex items-center gap-2"><SeverityBadge sev={selectedFinding.severity} /> <StatusPill status={triageOf(selectedFinding)} /></div>
                   <h3 className="text-xl leading-tight text-white font-semibold pr-8">{selectedFinding.title}</h3>
                   <div className="mt-4 text-xs font-mono text-[#52525b]">{selectedFinding.asset}{selectedFinding.port ? ':' + selectedFinding.port : ''}</div>
+
+                  <div className="mt-5">
+                    <div className="uppercase text-[10px] tracking-widest text-[#52525b] mb-1.5">Triage</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {TRIAGE_STATUSES.map((st) => (
+                        <button
+                          key={st}
+                          onClick={() => updateFinding(selectedFinding.id, { status: st })}
+                          className={`status-pill status-${st} is-button ${triageOf(selectedFinding) === st ? 'active' : ''}`}
+                        >
+                          {TRIAGE_LABELS[st]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
                   <div className="mt-6 text-sm space-y-4">
                     <div>
@@ -698,12 +811,14 @@ function App() {
 
               <div className="card p-0 overflow-hidden h-[520px] flex flex-col">
                 <div className="flex-1 p-5 space-y-4 overflow-auto text-sm bg-[#12141b]">
-                  {aiMessages.map((m, idx) => (
-                    <div key={idx} className={m.role === 'user' ? 'text-right' : ''}>
-                      <div className={`inline-block max-w-[85%] px-4 py-2 rounded-2xl whitespace-pre-wrap text-left ${m.role === 'user' ? 'bg-[#22d3ee] text-black' : 'bg-[#24262f] text-[#ededf0]'}`}>{m.content}</div>
-                    </div>
-                  ))}
-                  {aiLoading && <div className="text-[#52525b] text-xs">Thinking with local model...</div>}
+                  {aiMessages.map((m, idx) =>
+                    !m.content ? null : (
+                      <div key={idx} className={m.role === 'user' ? 'text-right' : ''}>
+                        <div className={`inline-block max-w-[85%] px-4 py-2 rounded-2xl whitespace-pre-wrap text-left ${m.role === 'user' ? 'bg-[#22d3ee] text-black' : 'bg-[#24262f] text-[#ededf0]'}`}>{m.content}</div>
+                      </div>
+                    ),
+                  )}
+                  {aiLoading && <div className="text-[#52525b] text-xs">Thinking with local model…</div>}
                 </div>
                 <div className="border-t border-[#24262f] p-3 flex gap-2 bg-[#16181f]">
                   <input
@@ -717,7 +832,7 @@ function App() {
                   <button onClick={sendToAI} disabled={aiLoading || !aiInput.trim()} className="btn btn-primary">Send</button>
                 </div>
               </div>
-              <div className="text-[11px] mt-2 text-[#52525b]">Uses local Ollama at 127.0.0.1:11434 (proxied through Rust in the desktop app). Demo mode is used when no model is reachable.</div>
+              <div className="text-[11px] mt-2 text-[#52525b]">Model <span className="font-mono text-[#71717a]">{ollamaModel}</span> @ <span className="font-mono text-[#71717a]">{ollamaEndpoint}</span> (configurable in Settings). Demo mode is used when no model is reachable.</div>
             </div>
           )}
 
@@ -727,7 +842,8 @@ function App() {
               <div className="card p-6 space-y-4">
                 <button onClick={() => exportFindings('md')} className="btn btn-primary w-full">Export Full Markdown Report</button>
                 <button onClick={() => exportFindings('json')} className="btn btn-secondary w-full">Export Machine-Readable JSON</button>
-                <div className="text-xs text-[#52525b] pt-2">Roadmap: PDF, SARIF 2.1, HTML executive summary, Jira ticket creation.</div>
+                <button onClick={() => exportFindings('sarif')} className="btn btn-secondary w-full">Export SARIF 2.1 (DefectDojo, GitHub code scanning)</button>
+                <div className="text-xs text-[#52525b] pt-2">Roadmap: PDF, HTML executive summary, Jira ticket creation.</div>
               </div>
             </div>
           )}
@@ -737,8 +853,35 @@ function App() {
               <h2 className="text-white text-2xl tracking-tight mb-6">Settings</h2>
               <div className="card p-6 space-y-6 text-sm">
                 <div>
-                  <div className="font-semibold mb-1">Local AI (Ollama)</div>
-                  <div className="text-[#71717a]">Endpoint: http://127.0.0.1:11434 — Spectra uses your local models for private analysis (proxied through the Rust backend in the desktop app).</div>
+                  <div className="font-semibold mb-2">Local AI (Ollama)</div>
+                  <div className="text-[#71717a] mb-3">Private, local analysis — proxied through the Rust backend in the desktop app (no CORS).</div>
+                  <div className="grid grid-cols-1 gap-3">
+                    <label className="block">
+                      <span className="text-[10px] uppercase tracking-widest text-[#52525b]">Endpoint</span>
+                      <input className="input mt-1 font-mono text-xs" value={ollamaEndpoint} onChange={(e) => setOllamaEndpoint(e.target.value)} placeholder="http://127.0.0.1:11434" />
+                    </label>
+                    <label className="block">
+                      <span className="text-[10px] uppercase tracking-widest text-[#52525b]">Model</span>
+                      <input className="input mt-1 font-mono text-xs" value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} placeholder="llama3.2" />
+                    </label>
+                  </div>
+                  <div className="flex items-center gap-2 mt-3">
+                    <button onClick={detectModels} className="btn btn-secondary text-xs">Detect installed models</button>
+                    {availableModels.length > 0 && <span className="text-[10px] text-[#52525b]">{availableModels.length} found</span>}
+                  </div>
+                  {availableModels.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {availableModels.map((m) => (
+                        <button
+                          key={m}
+                          onClick={() => setOllamaModel(m)}
+                          className={`status-pill is-button ${ollamaModel === m ? 'status-triaged active' : 'status-open'}`}
+                        >
+                          {m}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div className="font-semibold mb-1">External Tool Integration</div>

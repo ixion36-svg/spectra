@@ -13,6 +13,21 @@ export function normalizeSeverity(raw: unknown): Severity {
   return (SEVERITIES as readonly string[]).includes(s) ? (s as Severity) : 'info'
 }
 
+export const TRIAGE_STATUSES = ['open', 'confirmed', 'false-positive', 'triaged'] as const
+export type TriageStatus = (typeof TRIAGE_STATUSES)[number]
+
+export const TRIAGE_LABELS: Record<TriageStatus, string> = {
+  open: 'Open',
+  confirmed: 'Confirmed',
+  'false-positive': 'False positive',
+  triaged: 'Triaged',
+}
+
+/** A finding without an explicit triage status is treated as 'open'. */
+export function triageOf(f: { status?: TriageStatus }): TriageStatus {
+  return f.status ?? 'open'
+}
+
 export interface Finding {
   id: string
   scanId: string
@@ -32,6 +47,7 @@ export interface Finding {
   tags: string[]
   exploitability?: number // 0-100 "beyond normal" score
   source?: string // 'nuclei' | 'trivy' | 'rust-tcp' | 'rust-http' | 'simulator'
+  status?: TriageStatus // analyst triage state; defaults to 'open'
 }
 
 export type View = 'dashboard' | 'new' | 'findings' | 'graph' | 'ai' | 'reports' | 'settings'
