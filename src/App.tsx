@@ -82,6 +82,9 @@ function App() {
   }, [realScanActive])
 
   const engineRef = useRef<SpectraEngine | null>(null)
+  // Scan ids that have reached a terminal state, so a late completion can't
+  // overwrite a cancellation (and vice-versa).
+  const terminalScansRef = useRef<Set<string>>(new Set())
 
   const growGraph = useCallback((f: Finding) => {
     const asset = f.asset
@@ -105,6 +108,9 @@ function App() {
   }, [])
 
   const finishScan = useCallback((id: string, status: 'completed' | 'cancelled') => {
+    // Idempotent: first terminal transition wins (cancel beats a late completion).
+    if (terminalScansRef.current.has(id)) return
+    terminalScansRef.current.add(id)
     engineRef.current?.stop()
     engineRef.current = null
     setIsScanning(false)
@@ -171,8 +177,10 @@ function App() {
         const pr = progressPayloadSchema.safeParse(p.data)
         setScanProgress(pr.success ? pr.data.progress ?? 0 : 0)
       } else if (p.event_type === 'complete') {
-        // External tool finished — mark the scan completed.
-        finishScan(activeScanId, 'completed')
+        // One tool finished. Overall completion is driven by Promise.allSettled
+        // over every native job (see startNewScan), so we don't finish here —
+        // otherwise the first tool to finish would end the whole scan.
+        console.log('[Spectra Real] tool complete')
       } else if (p.event_type === 'cancelled') {
         finishScan(activeScanId, 'cancelled')
       } else if (p.event_type === 'error') {
@@ -233,39 +241,49 @@ function App() {
     setSearchTerm('')
     setSeverityFilter(['critical', 'high', 'medium', 'low', 'info'])
 
-    const firstTarget = targets[0]
-
     if (isTauriEnv && useRealEngine) {
       setRealScanActive(true)
-      const host = firstTarget.replace(/^https?:\/\//, '').split('/')[0]
-      tcpPortScan(id, host, COMMON_PORTS, 80).catch((e) => console.warn('TCP scan error', e))
-      runExternalScan(id, 'nuclei', firstTarget, []).catch((e) => console.warn('Nuclei error', e))
-
       const bestTool = realTools.find((t) => t.available && ['trivy', 'nmap'].includes(t.name))?.name
-      if (bestTool) runExternalScan(id, bestTool, firstTarget, []).catch((e) => console.warn('Secondary tool error', e))
 
-      if (firstTarget.includes('http') || firstTarget.includes('.')) {
-        httpProbe(firstTarget)
-          .then((probe) => {
-            if (!probe?.server) return
-            const f: Finding = {
-              id: 'probe_' + Date.now(),
-              scanId: id,
-              severity: 'low',
-              title: `Web server banner: ${probe.server}`,
-              asset: firstTarget,
-              evidence: JSON.stringify(probe),
-              description: 'HTTP probe result from native reqwest client.',
-              recommendation: 'Harden headers and review exposed version information.',
-              discoveredAt: new Date().toISOString(),
-              tags: ['http', 'banner', 'rust'],
-              source: 'rust-http',
-            }
-            setScans((prev) => prev.map((s) => (s.id === id ? { ...s, findings: [...(s.findings || []), f] } : s)))
-          })
-          .catch(() => {})
+      // Fan out every native job across ALL targets; the scan is "complete" only
+      // once every job settles (resolved or rejected), so a single tool finishing
+      // — or failing to spawn — doesn't end the whole scan early.
+      const jobs: Promise<unknown>[] = []
+      for (const target of targets) {
+        const host = target.replace(/^https?:\/\//, '').split('/')[0]
+        jobs.push(tcpPortScan(id, host, COMMON_PORTS, 80).catch((e) => console.warn('TCP scan error', e)))
+        jobs.push(runExternalScan(id, 'nuclei', target, []).catch((e) => console.warn('Nuclei error', e)))
+        if (bestTool) jobs.push(runExternalScan(id, bestTool, target, []).catch((e) => console.warn('Secondary tool error', e)))
+
+        if (target.includes('http') || target.includes('.')) {
+          jobs.push(
+            httpProbe(target)
+              .then((probe) => {
+                if (!probe?.server) return
+                const f: Finding = {
+                  id: 'probe_' + Date.now() + Math.random().toString(36).slice(2, 6),
+                  scanId: id,
+                  severity: 'low',
+                  title: `Web server banner: ${probe.server}`,
+                  asset: target,
+                  evidence: JSON.stringify(probe),
+                  description: 'HTTP probe result from native reqwest client.',
+                  recommendation: 'Harden headers and review exposed version information.',
+                  discoveredAt: new Date().toISOString(),
+                  tags: ['http', 'banner', 'rust'],
+                  source: 'rust-http',
+                }
+                setScans((prev) => prev.map((s) => (s.id === id ? { ...s, findings: [...(s.findings || []), f] } : s)))
+              })
+              .catch(() => {}),
+          )
+        }
       }
-      toast('Native scan started', { description: bestTool ? `nuclei + ${bestTool} + Rust TCP` : 'nuclei + Rust TCP' })
+
+      Promise.allSettled(jobs).then(() => finishScan(id, 'completed'))
+      toast('Native scan started', {
+        description: `${targets.length} target${targets.length > 1 ? 's' : ''} • ${bestTool ? `nuclei + ${bestTool} + Rust TCP` : 'nuclei + Rust TCP'}`,
+      })
     } else {
       const engine = new SpectraEngine(
         (finding) => setScans((prev) => prev.map((s) => (s.id === id ? { ...s, findings: [...s.findings, finding] } : s))),
@@ -279,19 +297,13 @@ function App() {
       engine.start(targets, newProfile, id)
       toast('Simulated scan started', { description: 'Demo data — enable real tools in the desktop app for live results.' })
     }
-  }, [newTargets, newProfile, newScanName, realTools, useRealEngine, growGraph])
+  }, [newTargets, newProfile, newScanName, realTools, useRealEngine, growGraph, finishScan])
 
   const cancelScan = useCallback(() => {
-    engineRef.current?.stop()
-    engineRef.current = null
-    setIsScanning(false)
-    setRealScanActive(false)
-    if (activeScanId) {
-      setScans((prev) => prev.map((s) => (s.id === activeScanId ? { ...s, status: 'cancelled', completedAt: new Date().toISOString(), progress: 100 } : s)))
-      if (isTauriEnv && useRealEngine) cancelRealScan(activeScanId).catch(() => {})
-      toast('Scan cancelled')
-    }
-  }, [activeScanId, useRealEngine])
+    if (!activeScanId) return
+    if (isTauriEnv && useRealEngine) cancelRealScan(activeScanId).catch(() => {})
+    finishScan(activeScanId, 'cancelled') // marks terminal; a late completion becomes a no-op
+  }, [activeScanId, useRealEngine, finishScan])
 
   // Simulator completion is driven by progress; native completion by the 'complete' event.
   useEffect(() => {

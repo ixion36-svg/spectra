@@ -617,9 +617,20 @@ async fn cancel_real_scan(
     };
 
     for pid in pids {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output();
+        // Cross-platform process termination. On Windows, /T also kills the
+        // child process tree (tools like nmap/nuclei spawn helpers).
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F", "/T"])
+                .output();
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
+        }
     }
 
     let _ = app.emit("scan-event", ScanEvent {
