@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -146,6 +147,9 @@ async fn run_external_scan(
     state: tauri::State<'_, RunningScans>,
 ) -> Result<ExternalScanResult, String> {
     let start = std::time::Instant::now();
+
+    // Reject flag-like / malformed targets before they reach an external tool.
+    validate_target(&target)?;
 
     // Resolve the binary (prefer direct name so PATH including user additions works)
     let binary = match tool.as_str() {
@@ -307,6 +311,7 @@ async fn tcp_port_scan(
     ports: Vec<u16>,
     concurrency: Option<usize>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    validate_target(&host)?;
     let concurrency = concurrency.unwrap_or(50);
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
     let mut tasks = Vec::new();
@@ -383,6 +388,24 @@ async fn tcp_port_scan(
     });
 
     Ok(open_ports)
+}
+
+/// Reject targets that could be misread as command-line flags (argument
+/// injection) when appended positionally to tools like nmap, or that contain
+/// whitespace/control characters. We never use a shell, so this is the relevant
+/// guard rather than shell-metacharacter escaping.
+fn validate_target(target: &str) -> Result<(), String> {
+    let t = target.trim();
+    if t.is_empty() {
+        return Err("empty target".into());
+    }
+    if t.starts_with('-') {
+        return Err(format!("target '{}' may not start with '-'", t));
+    }
+    if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("target contains whitespace or control characters".into());
+    }
+    Ok(())
 }
 
 fn guess_service(port: u16) -> &'static str {
@@ -520,6 +543,7 @@ async fn http_probe(target: String) -> Result<serde_json::Value, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    validate_target(&target)?;
     let url = if target.starts_with("http") { target } else { format!("http://{}", target) };
 
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -540,6 +564,148 @@ async fn http_probe(target: String) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Normalise a user-supplied Ollama endpoint: trim, require http(s), strip a
+/// trailing slash. Returns the base URL (without a path).
+fn normalize_ollama_endpoint(endpoint: &str) -> Result<String, String> {
+    let e = endpoint.trim().trim_end_matches('/');
+    if !(e.starts_with("http://") || e.starts_with("https://")) {
+        return Err("Ollama endpoint must start with http:// or https://".into());
+    }
+    Ok(e.to_string())
+}
+
+/// Proxy a generation request to the local Ollama instance from Rust.
+/// This avoids the webview making a cross-origin fetch (no CORS, and the
+/// Ollama host no longer needs to be allow-listed in the CSP connect-src).
+#[tauri::command]
+async fn ollama_generate(prompt: String, model: String, endpoint: String) -> Result<String, String> {
+    let base = normalize_ollama_endpoint(&endpoint)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": false,
+        "options": { "temperature": 0.3, "num_predict": 380 }
+    });
+
+    let resp = client
+        .post(format!("{}/api/generate", base))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ollama not reachable: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Ollama returned HTTP {}", resp.status().as_u16()));
+    }
+
+    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let reply = val
+        .get("response")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if reply.is_empty() {
+        return Err("Ollama returned an empty response".into());
+    }
+    Ok(reply)
+}
+
+/// Stream a generation from Ollama, emitting each token to the frontend via a
+/// Tauri Channel as it arrives. Returns once the stream is complete.
+#[tauri::command]
+async fn ollama_generate_stream(
+    prompt: String,
+    model: String,
+    endpoint: String,
+    on_token: Channel<String>,
+) -> Result<(), String> {
+    let base = normalize_ollama_endpoint(&endpoint)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": true,
+        "options": { "temperature": 0.3 }
+    });
+
+    let mut resp = client
+        .post(format!("{}/api/generate", base))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ollama not reachable: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Ollama returned HTTP {}", resp.status().as_u16()));
+    }
+
+    // Ollama streams newline-delimited JSON. Buffer bytes and decode only
+    // complete lines, so a multi-byte char split across chunks is never mangled.
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        buf.extend_from_slice(&chunk);
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(tok) = val.get("response").and_then(|v| v.as_str()) {
+                    if !tok.is_empty() {
+                        let _ = on_token.send(tok.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// List models installed in the local Ollama instance (GET /api/tags).
+#[tauri::command]
+async fn ollama_models(endpoint: String) -> Result<Vec<String>, String> {
+    let base = normalize_ollama_endpoint(&endpoint)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .get(format!("{}/api/tags", base))
+        .send()
+        .await
+        .map_err(|e| format!("Ollama not reachable: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Ollama returned HTTP {}", resp.status().as_u16()));
+    }
+
+    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let names = val
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(names)
+}
+
 #[tauri::command]
 async fn cancel_real_scan(
     app: tauri::AppHandle,
@@ -552,9 +718,20 @@ async fn cancel_real_scan(
     };
 
     for pid in pids {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output();
+        // Cross-platform process termination. On Windows, /T also kills the
+        // child process tree (tools like nmap/nuclei spawn helpers).
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F", "/T"])
+                .output();
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
+        }
     }
 
     let _ = app.emit("scan-event", ScanEvent {
@@ -606,7 +783,6 @@ async fn load_scans(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, Str
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .manage(RunningScans::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -623,10 +799,106 @@ pub fn run() {
             run_external_scan,
             tcp_port_scan,
             http_probe,
+            ollama_generate,
+            ollama_generate_stream,
+            ollama_models,
             save_scan,
             load_scans,
             cancel_real_scan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_target_accepts_normal_targets() {
+        assert!(validate_target("example.com").is_ok());
+        assert!(validate_target("https://example.com/path").is_ok());
+        assert!(validate_target("10.10.14.7").is_ok());
+        assert!(validate_target("10.0.0.0/24").is_ok());
+    }
+
+    #[test]
+    fn validate_target_rejects_flag_injection() {
+        // The argv-injection vector: a "target" that nmap would read as a flag.
+        assert!(validate_target("-oN/etc/passwd").is_err());
+        assert!(validate_target("--script=evil").is_err());
+        assert!(validate_target("").is_err());
+        assert!(validate_target("a b").is_err()); // whitespace
+        assert!(validate_target("a\nb").is_err()); // control char
+    }
+
+    #[test]
+    fn normalize_ollama_endpoint_trims_and_validates() {
+        assert_eq!(normalize_ollama_endpoint("http://127.0.0.1:11434/").unwrap(), "http://127.0.0.1:11434");
+        assert_eq!(normalize_ollama_endpoint("  https://host:1234  ").unwrap(), "https://host:1234");
+        assert!(normalize_ollama_endpoint("127.0.0.1:11434").is_err()); // missing scheme
+        assert!(normalize_ollama_endpoint("ftp://x").is_err());
+    }
+
+    #[test]
+    fn guess_service_maps_known_ports() {
+        assert_eq!(guess_service(22), "ssh");
+        assert_eq!(guess_service(443), "https");
+        assert_eq!(guess_service(9999), "unknown");
+    }
+
+    #[test]
+    fn nuclei_mapping_extracts_core_fields() {
+        let line = serde_json::json!({
+            "matched-at": "https://t.example/login",
+            "info": {
+                "name": "Exposed admin panel",
+                "severity": "High",
+                "description": "Admin panel reachable",
+                "tags": ["panel", "exposure"],
+                "classification": { "cve-id": ["CVE-2023-1234"], "cwe-id": ["CWE-284"] },
+                "template-id": "exposed-panel"
+            }
+        });
+        let f = map_nuclei_to_finding(&line).expect("should map");
+        assert_eq!(f["title"], "Exposed admin panel");
+        assert_eq!(f["severity"], "high"); // normalised to lowercase
+        assert_eq!(f["asset"], "https://t.example/login");
+        assert_eq!(f["source"], "nuclei");
+        assert_eq!(f["exploitability"], 75);
+        assert_eq!(f["template"], "exposed-panel");
+    }
+
+    #[test]
+    fn nuclei_mapping_defaults_unknown_severity_to_info() {
+        let line = serde_json::json!({ "info": { "name": "x", "severity": "bogus" } });
+        let f = map_nuclei_to_finding(&line).unwrap();
+        assert_eq!(f["severity"], "info");
+        assert_eq!(f["exploitability"], 35);
+    }
+
+    #[test]
+    fn nuclei_mapping_requires_info() {
+        assert!(map_nuclei_to_finding(&serde_json::json!({ "host": "x" })).is_none());
+    }
+
+    #[test]
+    fn trivy_mapping_builds_titled_finding() {
+        let v = serde_json::json!({
+            "VulnerabilityID": "CVE-2021-1111",
+            "PkgName": "openssl",
+            "Severity": "CRITICAL",
+            "InstalledVersion": "1.0.0",
+            "FixedVersion": "1.0.1",
+            "Description": "bad",
+            "CweIDs": ["CWE-119"]
+        });
+        let f = map_trivy_to_finding(&v, "repo").expect("should map");
+        assert_eq!(f["title"], "CVE-2021-1111 in openssl");
+        assert_eq!(f["severity"], "critical");
+        assert_eq!(f["source"], "trivy");
+        assert_eq!(f["asset"], "repo");
+        assert_eq!(f["exploitability"], 85);
+        assert_eq!(f["cve"][0], "CVE-2021-1111");
+    }
 }

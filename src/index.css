@@ -70,6 +70,26 @@ h1, h2, h3 {
 .sev-low      { background: rgba(34, 197, 94, 0.15); color: var(--low);      border: 1px solid rgba(34, 197, 94, 0.3); }
 .sev-info     { background: rgba(59, 130, 246, 0.15); color: var(--info);     border: 1px solid rgba(59, 130, 246, 0.3); }
 
+/* Triage status pills */
+.status-pill {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.status-open           { background: rgba(113,113,122,0.15); color: #a1a1aa; border-color: rgba(113,113,122,0.3); }
+.status-confirmed      { background: rgba(239,68,68,0.15);  color: var(--critical); border-color: rgba(239,68,68,0.3); }
+.status-false-positive { background: rgba(34,197,94,0.12);  color: var(--low); border-color: rgba(34,197,94,0.3); }
+.status-triaged        { background: rgba(34,211,238,0.12); color: var(--accent); border-color: var(--accent-border); }
+
+.status-pill.is-button { cursor: pointer; opacity: 0.55; }
+.status-pill.is-button:hover { opacity: 0.85; }
+.status-pill.is-button.active { opacity: 1; }
+
 .table-container {
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -202,6 +222,69 @@ tr:hover {
   --normal-bg: var(--bg-card);
   --normal-border: var(--border);
   --normal-text: var(--text-h);
+}
+
+/* Command palette (cmdk) */
+[cmdk-overlay] {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 90;
+}
+.cmdk-dialog {
+  position: fixed;
+  top: 18%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, 92vw);
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  overflow: hidden;
+}
+.cmdk-input {
+  width: 100%;
+  background: var(--bg-elev);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-h);
+  padding: 14px 16px;
+  font-size: 15px;
+  outline: none;
+}
+.cmdk-list {
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px;
+}
+.cmdk-empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+[cmdk-group-heading] {
+  padding: 8px 10px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+}
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--text-h);
+  font-size: 14px;
+  cursor: pointer;
+}
+.cmdk-item[data-selected='true'] {
+  background: var(--accent-bg);
+  color: var(--accent);
 }
 
 /* Flow / graph container polish */
