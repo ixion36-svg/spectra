@@ -147,6 +147,9 @@ async fn run_external_scan(
 ) -> Result<ExternalScanResult, String> {
     let start = std::time::Instant::now();
 
+    // Reject flag-like / malformed targets before they reach an external tool.
+    validate_target(&target)?;
+
     // Resolve the binary (prefer direct name so PATH including user additions works)
     let binary = match tool.as_str() {
         "nuclei" => "nuclei",
@@ -307,6 +310,7 @@ async fn tcp_port_scan(
     ports: Vec<u16>,
     concurrency: Option<usize>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    validate_target(&host)?;
     let concurrency = concurrency.unwrap_or(50);
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
     let mut tasks = Vec::new();
@@ -383,6 +387,24 @@ async fn tcp_port_scan(
     });
 
     Ok(open_ports)
+}
+
+/// Reject targets that could be misread as command-line flags (argument
+/// injection) when appended positionally to tools like nmap, or that contain
+/// whitespace/control characters. We never use a shell, so this is the relevant
+/// guard rather than shell-metacharacter escaping.
+fn validate_target(target: &str) -> Result<(), String> {
+    let t = target.trim();
+    if t.is_empty() {
+        return Err("empty target".into());
+    }
+    if t.starts_with('-') {
+        return Err(format!("target '{}' may not start with '-'", t));
+    }
+    if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("target contains whitespace or control characters".into());
+    }
+    Ok(())
 }
 
 fn guess_service(port: u16) -> &'static str {
@@ -520,6 +542,7 @@ async fn http_probe(target: String) -> Result<serde_json::Value, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    validate_target(&target)?;
     let url = if target.starts_with("http") { target } else { format!("http://{}", target) };
 
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -538,6 +561,48 @@ async fn http_probe(target: String) -> Result<serde_json::Value, String> {
         "x_powered_by": powered,
         "headers_sample": headers.into_iter().take(12).collect::<Vec<_>>(),
     }))
+}
+
+/// Proxy a generation request to the local Ollama instance from Rust.
+/// This avoids the webview making a cross-origin fetch (no CORS, and the
+/// Ollama host no longer needs to be allow-listed in the CSP connect-src).
+#[tauri::command]
+async fn ollama_generate(prompt: String, model: String) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": false,
+        "options": { "temperature": 0.3, "num_predict": 380 }
+    });
+
+    let resp = client
+        .post("http://127.0.0.1:11434/api/generate")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ollama not reachable: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Ollama returned HTTP {}", resp.status().as_u16()));
+    }
+
+    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let reply = val
+        .get("response")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if reply.is_empty() {
+        return Err("Ollama returned an empty response".into());
+    }
+    Ok(reply)
 }
 
 #[tauri::command]
@@ -606,7 +671,6 @@ async fn load_scans(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, Str
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .manage(RunningScans::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -623,10 +687,96 @@ pub fn run() {
             run_external_scan,
             tcp_port_scan,
             http_probe,
+            ollama_generate,
             save_scan,
             load_scans,
             cancel_real_scan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_target_accepts_normal_targets() {
+        assert!(validate_target("example.com").is_ok());
+        assert!(validate_target("https://example.com/path").is_ok());
+        assert!(validate_target("10.10.14.7").is_ok());
+        assert!(validate_target("10.0.0.0/24").is_ok());
+    }
+
+    #[test]
+    fn validate_target_rejects_flag_injection() {
+        // The argv-injection vector: a "target" that nmap would read as a flag.
+        assert!(validate_target("-oN/etc/passwd").is_err());
+        assert!(validate_target("--script=evil").is_err());
+        assert!(validate_target("").is_err());
+        assert!(validate_target("a b").is_err()); // whitespace
+        assert!(validate_target("a\nb").is_err()); // control char
+    }
+
+    #[test]
+    fn guess_service_maps_known_ports() {
+        assert_eq!(guess_service(22), "ssh");
+        assert_eq!(guess_service(443), "https");
+        assert_eq!(guess_service(9999), "unknown");
+    }
+
+    #[test]
+    fn nuclei_mapping_extracts_core_fields() {
+        let line = serde_json::json!({
+            "matched-at": "https://t.example/login",
+            "info": {
+                "name": "Exposed admin panel",
+                "severity": "High",
+                "description": "Admin panel reachable",
+                "tags": ["panel", "exposure"],
+                "classification": { "cve-id": ["CVE-2023-1234"], "cwe-id": ["CWE-284"] },
+                "template-id": "exposed-panel"
+            }
+        });
+        let f = map_nuclei_to_finding(&line).expect("should map");
+        assert_eq!(f["title"], "Exposed admin panel");
+        assert_eq!(f["severity"], "high"); // normalised to lowercase
+        assert_eq!(f["asset"], "https://t.example/login");
+        assert_eq!(f["source"], "nuclei");
+        assert_eq!(f["exploitability"], 75);
+        assert_eq!(f["template"], "exposed-panel");
+    }
+
+    #[test]
+    fn nuclei_mapping_defaults_unknown_severity_to_info() {
+        let line = serde_json::json!({ "info": { "name": "x", "severity": "bogus" } });
+        let f = map_nuclei_to_finding(&line).unwrap();
+        assert_eq!(f["severity"], "info");
+        assert_eq!(f["exploitability"], 35);
+    }
+
+    #[test]
+    fn nuclei_mapping_requires_info() {
+        assert!(map_nuclei_to_finding(&serde_json::json!({ "host": "x" })).is_none());
+    }
+
+    #[test]
+    fn trivy_mapping_builds_titled_finding() {
+        let v = serde_json::json!({
+            "VulnerabilityID": "CVE-2021-1111",
+            "PkgName": "openssl",
+            "Severity": "CRITICAL",
+            "InstalledVersion": "1.0.0",
+            "FixedVersion": "1.0.1",
+            "Description": "bad",
+            "CweIDs": ["CWE-119"]
+        });
+        let f = map_trivy_to_finding(&v, "repo").expect("should map");
+        assert_eq!(f["title"], "CVE-2021-1111 in openssl");
+        assert_eq!(f["severity"], "critical");
+        assert_eq!(f["source"], "trivy");
+        assert_eq!(f["asset"], "repo");
+        assert_eq!(f["exploitability"], 85);
+        assert_eq!(f["cve"][0], "CVE-2021-1111");
+    }
 }

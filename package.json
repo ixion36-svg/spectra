@@ -8,28 +8,27 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "vitest run",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },
   "dependencies": {
-    "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.14.3",
     "@tauri-apps/api": "^2.11.0",
     "@xyflow/react": "^12.11.0",
     "cmdk": "^1.1.1",
     "date-fns": "^4.4.0",
-    "framer-motion": "^12.40.0",
     "lucide-react": "^1.18.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "recharts": "^3.8.1",
     "sonner": "^2.0.7",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@tailwindcss/vite": "^4.3.1",
     "@tauri-apps/cli": "^2.11.2",
     "@types/node": "^24.12.3",
     "@types/react": "^19.2.14",
@@ -39,8 +38,10 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
+    "tailwindcss": "^4.3.1",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
-    "vite": "^8.0.12"
+    "vite": "^8.0.12",
+    "vitest": "^4.1.9"
   }
 }

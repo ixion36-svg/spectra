@@ -1,0 +1,82 @@
+// Centralised, typed Tauri bridge. The web build stays fully independent:
+// nothing here imports @tauri-apps/* at module load — APIs are lazy-loaded only
+// inside a real Tauri webview.
+import type { Scan, ScanEvent, ToolStatus } from '../types'
+
+export const isTauriEnv =
+  typeof window !== 'undefined' && (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== undefined
+
+type InvokeFn = <T = unknown>(cmd: string, args?: Record<string, unknown>) => Promise<T>
+type ListenFn = <T = unknown>(event: string, handler: (e: { payload: T }) => void) => Promise<() => void>
+
+let invokeFn: InvokeFn | null = null
+let listenFn: ListenFn | null = null
+let loadPromise: Promise<void> | null = null
+
+async function ensureApi(): Promise<void> {
+  if (!isTauriEnv) return
+  if (invokeFn) return
+  if (!loadPromise) {
+    loadPromise = (async () => {
+      try {
+        const [core, event] = await Promise.all([
+          import('@tauri-apps/api/core'),
+          import('@tauri-apps/api/event'),
+        ])
+        invokeFn = core.invoke as InvokeFn
+        listenFn = event.listen as ListenFn
+      } catch (e) {
+        console.warn('Tauri APIs not available', e)
+      }
+    })()
+  }
+  await loadPromise
+}
+
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  await ensureApi()
+  if (!invokeFn) throw new Error(`Tauri command ${cmd} called outside a Tauri webview`)
+  return invokeFn<T>(cmd, args)
+}
+
+// ── Command wrappers (argument shapes match the Rust #[tauri::command] params) ─
+
+export function detectInstalledTools(): Promise<ToolStatus[]> {
+  return invoke<ToolStatus[]>('detect_installed_tools')
+}
+
+export function loadScans(): Promise<Scan[]> {
+  return invoke<Scan[]>('load_scans')
+}
+
+export function saveScan(scan: Scan): Promise<void> {
+  return invoke<void>('save_scan', { scan })
+}
+
+export function tcpPortScan(scanId: string, host: string, ports: number[], concurrency = 80): Promise<unknown[]> {
+  return invoke<unknown[]>('tcp_port_scan', { scanId, host, ports, concurrency })
+}
+
+export function runExternalScan(scanId: string, tool: string, target: string, extraArgs: string[] = []): Promise<unknown> {
+  return invoke('run_external_scan', { scanId, tool, target, extraArgs })
+}
+
+export function httpProbe(target: string): Promise<Record<string, unknown>> {
+  return invoke<Record<string, unknown>>('http_probe', { target })
+}
+
+export function cancelRealScan(scanId: string): Promise<void> {
+  return invoke<void>('cancel_real_scan', { scanId })
+}
+
+/** Generate text via the local Ollama model, proxied through Rust (no CORS,
+ *  no external connect-src). Returns the model's response string. */
+export function ollamaGenerate(prompt: string, model = 'llama3.2'): Promise<string> {
+  return invoke<string>('ollama_generate', { prompt, model })
+}
+
+export async function listenScanEvents(handler: (e: ScanEvent) => void): Promise<() => void> {
+  await ensureApi()
+  if (!listenFn) return () => {}
+  return listenFn<ScanEvent>('scan-event', (event) => handler(event.payload))
+}

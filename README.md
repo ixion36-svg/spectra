@@ -17,12 +17,19 @@
 
 ## Current Status (v0.1)
 
-✅ Gorgeous fully-functional GUI (New Scan wizard, live findings table, detail drawer, filters, attack graph, AI co-pilot chat, reports, dashboard)  
-✅ Realistic streaming scan simulation with "beyond normal" correlated findings  
-✅ Ollama integration (falls back to smart demo intelligence if model not reachable)  
-✅ Full local persistence of scans via localStorage (easy to move to SQLite)  
-🚧 Real Rust/Tauri native engine + external tool bridge (nuclei etc.) — next major step  
-🚧 True interactive @xyflow graph + more advanced correlation
+✅ Fully-functional GUI (New Scan wizard, virtualized findings table, detail drawer, filters, interactive attack graph, AI co-pilot chat, reports, dashboard)  
+✅ `⌘K` / `Ctrl+K` command palette (cmdk)  
+✅ Browser scan **simulator** for demos — every simulated finding is tagged `source: simulator` and the UI shows a prominent "SIMULATED DATA" banner so demo data is never mistaken for real results  
+✅ **Real native engine (Tauri + Rust)** — implemented:
+  - Concurrent pure-Rust TCP connect scanner (semaphore-bounded)
+  - External tool orchestration: **Nuclei** (live JSONL → rich findings), **Trivy** (JSON → findings), **Nmap**, with PATH + WinGet auto-detection and per-scan cancellation
+  - Native HTTP banner/header probe (reqwest)
+  - Local **Ollama** co-pilot, proxied through Rust (no CORS; nothing external in the webview CSP)
+  - File-based scan persistence in the app data dir (survives restarts)  
+✅ Security hardening: strict Content-Security-Policy, least-privilege Tauri capabilities (no shell-plugin surface — process execution is native Rust only), scan-target validation against argument-injection, CSV-export formula-injection guard  
+✅ Tests: Rust unit tests for the Nuclei/Trivy mappers + target validator; Vitest for the export/severity/payload-validation helpers  
+🚧 SQLite-backed durable storage (currently localStorage in browser + JSON files in desktop)  
+🚧 SARIF 2.1 / PDF export, richer correlation, plugin system
 
 ## Quick Start (right now)
 
