@@ -1,6 +1,7 @@
 import { format } from 'date-fns'
 import { type Finding, type Scan, triageOf } from '../types'
 import { findingsToSarif } from './sarif'
+import { findingsToHtml } from './html'
 
 /**
  * Neutralise CSV/Excel formula injection. Scanner findings contain
@@ -55,7 +56,7 @@ export function findingsToMarkdown(scan: Scan): string {
   return md
 }
 
-export type ExportFormat = 'json' | 'csv' | 'md' | 'sarif'
+export type ExportFormat = 'json' | 'csv' | 'md' | 'sarif' | 'html'
 
 export function exportFindings(scan: Scan, fmt: ExportFormat): void {
   let blob: Blob
@@ -70,6 +71,9 @@ export function exportFindings(scan: Scan, fmt: ExportFormat): void {
   } else if (fmt === 'sarif') {
     blob = new Blob([JSON.stringify(findingsToSarif(scan), null, 2)], { type: 'application/sarif+json' })
     filename += '.sarif'
+  } else if (fmt === 'html') {
+    blob = new Blob([findingsToHtml(scan)], { type: 'text/html' })
+    filename += '.html'
   } else {
     blob = new Blob([findingsToMarkdown(scan)], { type: 'text/markdown' })
     filename += '.md'

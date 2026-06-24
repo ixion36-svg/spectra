@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { csvCell, findingsToCsv } from './export'
 import { hostOf } from './engine'
 import { findingsToSarif, sarifRuleId } from './sarif'
+import { findingsToHtml, escapeHtml } from './html'
 import { normalizeSeverity, findingPayloadSchema } from '../types'
 import type { Finding, Scan } from '../types'
 
@@ -100,6 +101,34 @@ describe('SARIF export', () => {
     const doc = toDoc(scan([mk({ cwe: 'CWE-89' }), mk({ id: '2', cwe: 'CWE-89' })]))
     expect(doc.runs[0].tool.driver.rules).toHaveLength(1)
     expect(doc.runs[0].results).toHaveLength(2)
+  })
+})
+
+describe('HTML report', () => {
+  const mk = (over: Partial<Finding>): Finding => ({
+    id: '1', scanId: 's', severity: 'high', title: 'SQLi', asset: 'h',
+    evidence: 'e', description: 'd', recommendation: 'r', discoveredAt: '', tags: [], ...over,
+  })
+  const scan = (findings: Finding[]): Scan => ({
+    id: 's', name: 'Test', targets: ['t'], profile: 'Web', status: 'completed', startedAt: '2026-01-01T00:00:00Z', findings, progress: 100,
+  })
+
+  it('escapeHtml neutralises HTML metacharacters', () => {
+    expect(escapeHtml('<script>alert(1)</script>')).toBe('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(escapeHtml('a & "b" \'c\'')).toBe('a &amp; &quot;b&quot; &#39;c&#39;')
+  })
+
+  it('produces a full HTML document with a summary and the finding count', () => {
+    const html = findingsToHtml(scan([mk({}), mk({ id: '2', severity: 'critical' })]))
+    expect(html.startsWith('<!doctype html>')).toBe(true)
+    expect(html).toContain('Findings (2)')
+  })
+
+  it('escapes attacker-influenced finding fields (no XSS in the report)', () => {
+    const html = findingsToHtml(scan([mk({ title: '<img src=x onerror=alert(1)>', evidence: '</pre><script>evil()</script>' })]))
+    expect(html).not.toContain('<img src=x onerror=alert(1)>')
+    expect(html).not.toContain('<script>evil()</script>')
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;')
   })
 })
 
