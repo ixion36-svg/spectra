@@ -28,6 +28,7 @@
   - **Multi-target** scans (every target gets the full toolchain; completion waits for all jobs to settle)
   - Native HTTP banner/header probe (reqwest)
   - Cross-platform process cancellation (taskkill /T on Windows, kill -9 on Unix)
+✅ **Continuous monitoring** — re-run a scan on an interval (15 min → 6 h); a banner shows it's active with a one-click stop  
 ✅ **Analyst triage** — mark findings Open / Confirmed / False-positive / Triaged, filter by status, and carry it into every export  
 ✅ **Local AI co-pilot (Ollama)** — proxied through Rust (no CORS, nothing external in the CSP), **streaming** token-by-token, with a **configurable model + endpoint** and one-click model detection  
 ✅ **Custom check plugins (v1)** — drop YAML HTTP checks (path + status/body-substring/regex match) into the app's `plugins/` folder; they run on every scan and emit findings. Two examples seeded on first run. (WASM/native plugin runtimes are future work.)  
@@ -116,7 +117,6 @@ Spectra is a tool for **authorized** security assessments, red teaming, purple t
 
 - OSV-scanner + SBOM import; dependency-risk and cloud-misconfig modules
 - Plugin system: WASM + native runtimes (YAML HTTP checks already shipped)
-- Scheduled / continuous scanning mode
 - PDF + HTML executive-summary export; Jira/Linear ticket creation
 - Signed, packaged builds for Windows, macOS, Linux (system tray, native menus)
 - False-positive reduction heuristics + local-model scoring

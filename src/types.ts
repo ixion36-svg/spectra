@@ -65,6 +65,7 @@ export interface Scan {
   completedAt?: string
   findings: Finding[]
   progress: number
+  repeatMinutes?: number // if set, this scan was launched in continuous mode
 }
 
 export interface GraphNode {
