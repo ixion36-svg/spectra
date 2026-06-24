@@ -22,7 +22,7 @@
 ✅ Browser scan **simulator** for demos — every simulated finding is tagged `source: simulator` and the UI shows a prominent "SIMULATED DATA" banner so demo data is never mistaken for real results  
 ✅ **Real native engine (Tauri + Rust)** — implemented:
   - Concurrent pure-Rust TCP connect scanner (semaphore-bounded)
-  - External tool orchestration: **Nuclei** (live JSONL → rich findings), **Trivy** (JSON → findings), **Nmap**, with PATH + WinGet auto-detection and per-scan cancellation
+  - External tool orchestration: **Nuclei** (live JSONL → rich findings), **Trivy** (JSON → findings), **Nmap**, and **OSV-Scanner** (dependency/SCA vulns), with PATH + WinGet auto-detection and per-scan cancellation
   - **Multi-target** scans (every target gets the full toolchain; completion waits for all jobs to settle)
   - Native HTTP banner/header probe (reqwest)
   - Cross-platform process cancellation (taskkill /T on Windows, kill -9 on Unix)
@@ -77,9 +77,10 @@ The native engine is **already built** (`src-tauri/`). To run it:
 In the desktop app, scans use the **real engine** instead of the simulator:
 
 - Pure-Rust concurrent TCP port scanner
-- External tools — **nmap**, **nuclei**, **trivy** — auto-detected on `PATH`
-  (and WinGet package dirs on Windows). Install whichever you want; Spectra runs
-  what's available and enriches their output into the shared `Finding` model.
+- External tools — **nmap**, **nuclei**, **trivy**, **osv-scanner** — auto-detected
+  on `PATH` (and WinGet package dirs on Windows). Install whichever you want;
+  Spectra runs what's available and enriches their output into the shared
+  `Finding` model.
 - Native HTTP banner/header probe (reqwest)
 - Ollama co-pilot, proxied through Rust (no CORS)
 
