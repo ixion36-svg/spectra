@@ -11,6 +11,7 @@ import {
   TRIAGE_STATUSES, TRIAGE_LABELS, triageOf,
 } from './types'
 import { SpectraEngine } from './lib/engine'
+import { dedupeFindings } from './lib/dedup'
 import { exportFindings as exportFindingsFile, type ExportFormat } from './lib/export'
 import {
   isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative, deleteScan as deleteScanNative,
@@ -52,12 +53,13 @@ function App() {
   const [severityFilter, setSeverityFilter] = useState<Severity[]>(['critical', 'high', 'medium', 'low', 'info'])
   const [statusFilter, setStatusFilter] = useState<TriageStatus[]>([...TRIAGE_STATUSES])
   const [searchTerm, setSearchTerm] = useState('')
+  const [dedup, setDedup] = useState(true)
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null)
 
   const filteredFindings = useMemo(() => {
     if (!activeScan) return []
     const term = searchTerm.toLowerCase()
-    return activeScan.findings
+    const matched = activeScan.findings
       .filter((f) => severityFilter.includes(f.severity))
       .filter((f) => statusFilter.includes(triageOf(f)))
       .filter((f) =>
@@ -66,8 +68,15 @@ function App() {
         f.asset.toLowerCase().includes(term) ||
         (f.service && f.service.toLowerCase().includes(term)),
       )
-      .sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || b.discoveredAt.localeCompare(a.discoveredAt))
-  }, [activeScan, severityFilter, statusFilter, searchTerm])
+    const reduced = dedup ? dedupeFindings(matched) : matched
+    return reduced.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || b.discoveredAt.localeCompare(a.discoveredAt))
+  }, [activeScan, severityFilter, statusFilter, searchTerm, dedup])
+
+  // How many raw findings the dedup pass folded away (for the toggle label).
+  const dedupedAway = useMemo(() => {
+    if (!activeScan || !dedup) return 0
+    return activeScan.findings.length - dedupeFindings(activeScan.findings).length
+  }, [activeScan, dedup])
 
   // Update a finding in place (used by triage controls) and keep the open drawer in sync.
   const updateFinding = useCallback(
@@ -734,7 +743,11 @@ function App() {
                     {TRIAGE_LABELS[st]}
                   </button>
                 ))}
-                <input className="input w-64 ml-auto text-sm h-8" placeholder="Filter by asset, title, service..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none ml-auto text-[#a1a1aa]" title="Collapse identical findings at the same location">
+                  <input type="checkbox" checked={dedup} onChange={(e) => setDedup(e.target.checked)} className="accent-[#22d3ee]" />
+                  Dedup{dedup && dedupedAway > 0 ? ` (−${dedupedAway})` : ''}
+                </label>
+                <input className="input w-56 text-sm h-8" placeholder="Filter by asset, title, service..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
               </div>
 
               <FindingsTable findings={filteredFindings} onSelect={setSelectedFinding} />

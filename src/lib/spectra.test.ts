@@ -3,6 +3,7 @@ import { csvCell, findingsToCsv } from './export'
 import { hostOf } from './engine'
 import { findingsToSarif, sarifRuleId } from './sarif'
 import { findingsToHtml, escapeHtml } from './html'
+import { dedupeFindings } from './dedup'
 import { normalizeSeverity, findingPayloadSchema } from '../types'
 import type { Finding, Scan } from '../types'
 
@@ -36,6 +37,39 @@ describe('findingsToCsv', () => {
     const [header, row] = csv.split('\n')
     expect(header.startsWith('severity,title,asset')).toBe(true)
     expect(row).toContain('"\'=HYPERLINK(""evil"")"')
+  })
+})
+
+describe('dedupeFindings', () => {
+  const mk = (over: Partial<Finding>): Finding => ({
+    id: Math.random().toString(), scanId: 's', severity: 'low', title: 'X', asset: 'h',
+    evidence: '', description: '', recommendation: '', discoveredAt: '', tags: [], ...over,
+  })
+
+  it('collapses identical findings at the same location and counts them', () => {
+    const out = dedupeFindings([mk({}), mk({}), mk({})])
+    expect(out).toHaveLength(1)
+    expect(out[0].duplicates).toBe(2) // 3 total → 1 shown + 2 folded
+  })
+
+  it('keeps the higher-signal representative (severity, then exploitability)', () => {
+    const out = dedupeFindings([
+      mk({ severity: 'low', exploitability: 10 }),
+      mk({ severity: 'critical', exploitability: 90 }),
+    ])
+    expect(out).toHaveLength(1)
+    expect(out[0].severity).toBe('critical')
+  })
+
+  it('does not merge findings at different locations', () => {
+    const out = dedupeFindings([mk({ asset: 'a' }), mk({ asset: 'b' }), mk({ title: 'Y', asset: 'a' })])
+    expect(out).toHaveLength(3)
+    expect(out.every((f) => f.duplicates === undefined)).toBe(true)
+  })
+
+  it('treats different ports as different locations', () => {
+    const out = dedupeFindings([mk({ port: 80 }), mk({ port: 443 })])
+    expect(out).toHaveLength(2)
   })
 })
 
