@@ -53,6 +53,10 @@ export function saveScan(scan: Scan): Promise<void> {
   return invoke<void>('save_scan', { scan })
 }
 
+export function deleteScan(id: string): Promise<void> {
+  return invoke<void>('delete_scan', { id })
+}
+
 export function tcpPortScan(scanId: string, host: string, ports: number[], concurrency = 80): Promise<unknown[]> {
   return invoke<unknown[]>('tcp_port_scan', { scanId, host, ports, concurrency })
 }

@@ -39,6 +39,10 @@ struct RunningScans {
     pids: Mutex<HashMap<String, Vec<u32>>>,
 }
 
+/// SQLite-backed scan store. The connection is synchronous, so it lives behind a
+/// Mutex; commands lock it briefly with no await held across the guard.
+struct Db(Mutex<rusqlite::Connection>);
+
 #[tauri::command]
 async fn detect_installed_tools(app: tauri::AppHandle) -> Result<Vec<ToolStatus>, String> {
     let tools = vec!["nmap", "nuclei", "trivy"];
@@ -743,41 +747,149 @@ async fn cancel_real_scan(
     Ok(())
 }
 
-/// Simple file-based persistence for scans (goes beyond in-memory only).
-/// Saves to the app's local data directory so history survives restarts.
-#[tauri::command]
-async fn save_scan(app: tauri::AppHandle, scan: serde_json::Value) -> Result<(), String> {
-    let dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).ok();
-    let id = scan
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let path = dir.join(format!("scan_{}.json", id));
-    let pretty = serde_json::to_string_pretty(&scan).map_err(|e| e.to_string())?;
-    std::fs::write(path, pretty).map_err(|e| e.to_string())?;
+// ── SQLite-backed scan persistence ──────────────────────────────────────────
+// A `scans` table holds scan metadata; a `findings` table holds one row per
+// finding (with the full finding JSON in `data`, plus denormalized columns for
+// querying). The frontend contract is unchanged: save_scan takes a whole Scan
+// value, load_scans returns an array of whole Scan values.
+
+fn init_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scans (
+            id           TEXT PRIMARY KEY,
+            name         TEXT,
+            targets      TEXT,
+            profile      TEXT,
+            status       TEXT,
+            started_at   TEXT,
+            completed_at TEXT,
+            progress     INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS findings (
+            id       TEXT PRIMARY KEY,
+            scan_id  TEXT NOT NULL,
+            severity TEXT,
+            status   TEXT,
+            title    TEXT,
+            asset    TEXT,
+            data     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);",
+    )?;
     Ok(())
 }
 
-#[tauri::command]
-async fn load_scans(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
-    let dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
+/// Upsert a scan and replace its findings, atomically.
+fn db_save_scan(conn: &mut rusqlite::Connection, scan: &serde_json::Value) -> rusqlite::Result<()> {
+    let id = scan.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+    let targets = scan.get("targets").map(|v| v.to_string()).unwrap_or_else(|| "[]".to_string());
+    let str_of = |k: &str| scan.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let progress = scan.get("progress").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT OR REPLACE INTO scans (id,name,targets,profile,status,started_at,completed_at,progress)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        rusqlite::params![id, str_of("name"), targets, str_of("profile"), str_of("status"), str_of("startedAt"), str_of("completedAt"), progress],
+    )?;
+    tx.execute("DELETE FROM findings WHERE scan_id = ?1", rusqlite::params![id])?;
+    if let Some(findings) = scan.get("findings").and_then(|v| v.as_array()) {
+        for f in findings {
+            let fid = f.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if fid.is_empty() {
+                continue;
+            }
+            let fstr = |k: &str| f.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+            tx.execute(
+                "INSERT OR REPLACE INTO findings (id,scan_id,severity,status,title,asset,data)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                rusqlite::params![fid, id, fstr("severity"), fstr("status"), fstr("title"), fstr("asset"), f.to_string()],
+            )?;
+        }
+    }
+    tx.commit()
+}
+
+/// Load all scans (newest first), each reassembled with its findings array.
+fn db_load_scans(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,name,targets,profile,status,started_at,completed_at,progress FROM scans ORDER BY started_at DESC",
+    )?;
+    let metas: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, i64)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+                row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut out = Vec::with_capacity(metas.len());
+    for (id, name, targets, profile, status, started_at, completed_at, progress) in metas {
+        let mut fstmt = conn.prepare("SELECT data FROM findings WHERE scan_id = ?1")?;
+        let findings: Vec<serde_json::Value> = fstmt
+            .query_map([&id], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .filter_map(|s| serde_json::from_str(&s).ok())
+            .collect();
+
+        let targets_val: serde_json::Value =
+            targets.as_deref().and_then(|t| serde_json::from_str(t).ok()).unwrap_or_else(|| serde_json::json!([]));
+
+        out.push(serde_json::json!({
+            "id": id,
+            "name": name,
+            "targets": targets_val,
+            "profile": profile,
+            "status": status,
+            "startedAt": started_at,
+            "completedAt": completed_at,
+            "progress": progress,
+            "findings": findings,
+        }));
+    }
+    Ok(out)
+}
+
+/// One-time migration: if the DB is empty, import any legacy `scan_*.json` files.
+fn import_legacy_json(conn: &mut rusqlite::Connection, dir: &std::path::Path) {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM scans", [], |r| r.get(0)).unwrap_or(0);
+    if count > 0 {
+        return;
+    }
+    if let Ok(rd) = std::fs::read_dir(dir) {
         for entry in rd.filter_map(|e| e.ok()) {
-            let name = entry.file_name();
-            if let Some(n) = name.to_str() {
+            if let Some(n) = entry.file_name().to_str() {
                 if n.starts_with("scan_") && n.ends_with(".json") {
                     if let Ok(content) = std::fs::read_to_string(entry.path()) {
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                            out.push(val);
+                            let _ = db_save_scan(conn, &val);
                         }
                     }
                 }
             }
         }
     }
-    Ok(out)
+}
+
+#[tauri::command]
+async fn save_scan(scan: serde_json::Value, db: tauri::State<'_, Db>) -> Result<(), String> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    db_save_scan(&mut conn, &scan).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn load_scans(db: tauri::State<'_, Db>) -> Result<Vec<serde_json::Value>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    db_load_scans(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_scan(id: String, db: tauri::State<'_, Db>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM findings WHERE scan_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM scans WHERE id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -792,6 +904,15 @@ pub fn run() {
                         .build(),
                 );
             }
+
+            // Open (or create) the SQLite store in the app data dir.
+            let dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(&dir).ok();
+            let mut conn = rusqlite::Connection::open(dir.join("spectra.db")).map_err(|e| e.to_string())?;
+            init_schema(&conn).map_err(|e| e.to_string())?;
+            import_legacy_json(&mut conn, &dir); // best-effort migration from the old JSON files
+            app.manage(Db(Mutex::new(conn)));
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -804,6 +925,7 @@ pub fn run() {
             ollama_models,
             save_scan,
             load_scans,
+            delete_scan,
             cancel_real_scan,
         ])
         .run(tauri::generate_context!())
@@ -813,6 +935,52 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_roundtrip_preserves_scan_and_findings() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let scan = serde_json::json!({
+            "id": "scan_1", "name": "Test", "targets": ["https://example.com"], "profile": "Web",
+            "status": "completed", "startedAt": "2026-01-01T00:00:00Z", "completedAt": "2026-01-01T00:01:00Z", "progress": 100,
+            "findings": [
+                {"id": "f1", "severity": "high", "status": "confirmed", "title": "SQLi", "asset": "https://example.com", "tags": ["web"]},
+                {"id": "f2", "severity": "low", "title": "Header", "asset": "example.com", "tags": []}
+            ]
+        });
+        db_save_scan(&mut conn, &scan).unwrap();
+        let loaded = db_load_scans(&conn).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let s = &loaded[0];
+        assert_eq!(s["id"], "scan_1");
+        assert_eq!(s["name"], "Test");
+        assert_eq!(s["targets"][0], "https://example.com");
+        assert_eq!(s["progress"], 100);
+        let findings = s["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 2);
+        let f1 = findings.iter().find(|f| f["id"] == "f1").unwrap();
+        assert_eq!(f1["status"], "confirmed"); // triage status survives the round-trip
+        assert_eq!(f1["severity"], "high");
+    }
+
+    #[test]
+    fn sqlite_save_is_idempotent_and_replaces_findings() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let mut scan = serde_json::json!({
+            "id": "s", "name": "n", "targets": [], "profile": "p", "status": "running", "startedAt": "t", "progress": 0,
+            "findings": [{"id": "a", "severity": "low", "title": "x", "asset": "h"}]
+        });
+        db_save_scan(&mut conn, &scan).unwrap();
+        scan["findings"] = serde_json::json!([
+            {"id": "b", "severity": "high", "title": "y", "asset": "h"},
+            {"id": "c", "severity": "medium", "title": "z", "asset": "h"}
+        ]);
+        db_save_scan(&mut conn, &scan).unwrap();
+        let loaded = db_load_scans(&conn).unwrap();
+        assert_eq!(loaded.len(), 1); // re-save updates, not duplicates
+        assert_eq!(loaded[0]["findings"].as_array().unwrap().len(), 2); // old finding 'a' replaced
+    }
 
     #[test]
     fn validate_target_accepts_normal_targets() {

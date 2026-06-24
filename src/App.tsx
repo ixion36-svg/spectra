@@ -13,7 +13,7 @@ import {
 import { SpectraEngine } from './lib/engine'
 import { exportFindings as exportFindingsFile, type ExportFormat } from './lib/export'
 import {
-  isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative,
+  isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative, deleteScan as deleteScanNative,
   tcpPortScan, runExternalScan, httpProbe, cancelRealScan, ollamaGenerateStream, ollamaModels as ollamaModelsNative, listenScanEvents,
 } from './lib/tauri'
 // Lazy-loaded: @xyflow/react is heavy and only needed on the Attack Graph view,
@@ -224,17 +224,22 @@ function App() {
     }
   }, [activeScanId, growGraph, finishScan])
 
-  // ── Persist scans (localStorage, quota-guarded) + native file persistence ───
+  // ── Persist scans: SQLite in the desktop app, localStorage in the browser ───
   useEffect(() => {
+    if (isTauriEnv) {
+      // Persist the scan currently being modified (the active one) to SQLite.
+      const active = scans.find((s) => s.id === activeScanId)
+      if (active) saveScanNative(active).catch(() => {})
+      return
+    }
     try {
       localStorage.setItem('spectra_scans', JSON.stringify(scans))
     } catch (e) {
       if (e instanceof DOMException && (e.name === 'QuotaExceededError' || e.code === 22)) {
-        toast.warning('Local storage full', { description: 'Older scans may not be saved in the browser. The desktop app persists to disk.' })
+        toast.warning('Local storage full', { description: 'Older scans may not be saved in the browser.' })
       }
     }
-    if (isTauriEnv && scans[0]) saveScanNative(scans[0]).catch(() => {})
-  }, [scans])
+  }, [scans, activeScanId])
 
   const startNewScan = useCallback(async () => {
     const targets = newTargets.split('\n').map((t) => t.trim()).filter(Boolean)
@@ -344,6 +349,7 @@ function App() {
       setCurrentView('dashboard')
     }
     setScans((prev) => prev.filter((s) => s.id !== id))
+    if (isTauriEnv) deleteScanNative(id).catch(() => {})
   }
 
   const loadScan = (scan: Scan) => {

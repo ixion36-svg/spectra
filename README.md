@@ -29,10 +29,9 @@
 ✅ **Analyst triage** — mark findings Open / Confirmed / False-positive / Triaged, filter by status, and carry it into every export  
 ✅ **Local AI co-pilot (Ollama)** — proxied through Rust (no CORS, nothing external in the CSP), **streaming** token-by-token, with a **configurable model + endpoint** and one-click model detection  
 ✅ **Exports** — JSON, CSV (formula-injection-safe), Markdown, and **SARIF 2.1** for DefectDojo / GitHub code scanning  
-✅ File-based scan persistence in the app data dir (survives restarts)  
+✅ **SQLite persistence** in the desktop app (`scans` + `findings` tables in the app data dir, with a one-time import of any legacy JSON scans); localStorage is the browser-only fallback  
 ✅ Security hardening: strict Content-Security-Policy, least-privilege Tauri capabilities (no shell-plugin surface — process execution is native Rust only), scan-target validation against argument-injection  
-✅ Tests: Rust unit tests for the Nuclei/Trivy mappers, target validator, and Ollama-endpoint normalizer; Vitest for export (CSV + SARIF), severity, and payload validation  
-🚧 SQLite-backed durable storage (currently localStorage in browser + JSON files in desktop)  
+✅ Tests: Rust unit tests for the Nuclei/Trivy mappers, target validator, Ollama-endpoint normalizer, and SQLite round-trip; Vitest for export (CSV + SARIF), severity, host parsing, and payload validation  
 🚧 PDF / HTML executive summary, richer correlation, plugin system
 
 ## Quick Start (browser dev)
@@ -101,13 +100,6 @@ Spectra is a tool for **authorized** security assessments, red teaming, purple t
 - All actions against targets are performed locally and logged.
 
 ## Roadmap
-
-Tracked as GitHub issues:
-
-- **[#3](https://github.com/ixion36-svg/spectra/issues/3)** — SQLite-backed durable storage (replace localStorage / JSON files)
-- **[#2](https://github.com/ixion36-svg/spectra/issues/2)** — code-split the attack graph to shrink the bundle
-
-Larger items:
 
 - OSV-scanner + SBOM import; dependency-risk and cloud-misconfig modules
 - Advanced plugin system (YAML + WASM + native)
