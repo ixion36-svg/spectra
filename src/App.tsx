@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef, lazy, Suspense } from 'react'
 import {
   Shield, BarChart3, GitBranch, Bot, FileText, Settings, Play, Square, Trash2, Download, Search, Plus, X, AlertTriangle, Cpu, FlaskConical,
 } from 'lucide-react'
@@ -16,7 +16,9 @@ import {
   isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative,
   tcpPortScan, runExternalScan, httpProbe, cancelRealScan, ollamaGenerateStream, ollamaModels as ollamaModelsNative, listenScanEvents,
 } from './lib/tauri'
-import { GraphView } from './components/GraphView'
+// Lazy-loaded: @xyflow/react is heavy and only needed on the Attack Graph view,
+// so it loads on demand instead of bloating the initial bundle.
+const GraphView = lazy(() => import('./components/GraphView').then((m) => ({ default: m.GraphView })))
 import { FindingsTable, SeverityBadge, StatusPill } from './components/FindingsTable'
 import { CommandPalette } from './components/CommandPalette'
 
@@ -798,7 +800,9 @@ function App() {
               </div>
               <div className="card h-[90%] border-[#32343e] overflow-hidden">
                 <div style={{ height: '100%' }} className="bg-[#0b0c11]">
-                  <GraphView nodes={graphNodes} edges={graphEdges} />
+                  <Suspense fallback={<div className="h-full flex items-center justify-center text-[#52525b] text-sm">Loading graph…</div>}>
+                    <GraphView nodes={graphNodes} edges={graphEdges} />
+                  </Suspense>
                 </div>
               </div>
             </div>
