@@ -58,29 +58,33 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS code-signing + notarization (optional)
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Tauri updater signature (optional)
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # NOTE: the macOS/updater signing env vars are intentionally NOT set
+          # here. Passing an empty APPLE_CERTIFICATE makes Tauri's bundler attempt
+          # `security import` on an empty cert and fail the macOS build. To enable
+          # signing, add the env block from the "Signing setup" comment below AND
+          # configure the matching repository secrets.
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: 'Spectra ${{ github.event.inputs.tag || github.ref_name }}'
-          releaseBody: 'Download the installer for your platform below. These builds are unsigned unless signing secrets are configured.'
+          releaseBody: 'Download the installer for your platform below. These builds are unsigned.'
           releaseDraft: true
           prerelease: false
 
 # ── Signing setup (to produce signed/notarized builds) ───────────────────────
-# macOS: add APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
-#   APPLE_SIGNING_IDENTITY, and for notarization APPLE_ID, APPLE_PASSWORD
-#   (app-specific), APPLE_TEAM_ID.
-# Windows: code-signing needs a certificate configured via
-#   `bundle.windows.certificateThumbprint` (+ the cert available on the runner)
-#   in src-tauri/tauri.conf.json — it is not driven purely by env vars.
-# Updater: TAURI_SIGNING_PRIVATE_KEY (+ password) signs update artifacts; only
-#   needed once the auto-updater is enabled.
+# Add this env block to the step above ONLY once the secrets exist (an empty
+# APPLE_CERTIFICATE breaks the macOS build):
+#
+#   env:
+#     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#     APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}                  # base64 .p12
+#     APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+#     APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+#     APPLE_ID: ${{ secrets.APPLE_ID }}                                   # for notarization
+#     APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}                       # app-specific password
+#     APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+#     TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }} # updater
+#     TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+#
+# Windows code-signing needs a certificate configured via
+# `bundle.windows.certificateThumbprint` in src-tauri/tauri.conf.json (+ the cert
+# available on the runner) — it is not driven purely by env vars.
