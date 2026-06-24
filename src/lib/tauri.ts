@@ -73,6 +73,23 @@ export function cancelRealScan(scanId: string): Promise<void> {
   return invoke<void>('cancel_real_scan', { scanId })
 }
 
+export interface PluginInfo {
+  id: string
+  name: string
+  severity: string
+  path: string
+}
+
+/** List installed YAML check plugins. */
+export function listPlugins(): Promise<PluginInfo[]> {
+  return invoke<PluginInfo[]>('list_plugins')
+}
+
+/** Run all installed plugin checks against a target; returns the match count. */
+export function runPluginChecks(scanId: string, target: string): Promise<number> {
+  return invoke<number>('run_plugin_checks', { scanId, target })
+}
+
 /** Generate text via the local Ollama model, proxied through Rust (no CORS,
  *  no external connect-src). Returns the model's response string. */
 export function ollamaGenerate(prompt: string, model: string, endpoint: string): Promise<string> {

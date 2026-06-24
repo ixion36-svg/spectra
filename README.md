@@ -28,7 +28,9 @@
   - Cross-platform process cancellation (taskkill /T on Windows, kill -9 on Unix)
 ✅ **Analyst triage** — mark findings Open / Confirmed / False-positive / Triaged, filter by status, and carry it into every export  
 ✅ **Local AI co-pilot (Ollama)** — proxied through Rust (no CORS, nothing external in the CSP), **streaming** token-by-token, with a **configurable model + endpoint** and one-click model detection  
-✅ **Exports** — JSON, CSV (formula-injection-safe), Markdown, and **SARIF 2.1** for DefectDojo / GitHub code scanning  
+✅ **Custom check plugins (v1)** — drop YAML HTTP checks (path + status/body-substring/regex match) into the app's `plugins/` folder; they run on every scan and emit findings. Two examples seeded on first run. (WASM/native plugin runtimes are future work.)  
+✅ **Noise reduction** — collapse duplicate findings at the same location (toggle, on by default)  
+✅ **Exports** — JSON, CSV (formula-injection-safe), Markdown, **HTML** (print-to-PDF), and **SARIF 2.1** for DefectDojo / GitHub code scanning  
 ✅ **SQLite persistence** in the desktop app (`scans` + `findings` tables in the app data dir, with a one-time import of any legacy JSON scans); localStorage is the browser-only fallback  
 ✅ Security hardening: strict Content-Security-Policy, least-privilege Tauri capabilities (no shell-plugin surface — process execution is native Rust only), scan-target validation against argument-injection  
 ✅ Tests: Rust unit tests for the Nuclei/Trivy mappers, target validator, Ollama-endpoint normalizer, and SQLite round-trip; Vitest for export (CSV + SARIF), severity, host parsing, and payload validation  
@@ -103,7 +105,7 @@ Spectra is a tool for **authorized** security assessments, red teaming, purple t
 ## Roadmap
 
 - OSV-scanner + SBOM import; dependency-risk and cloud-misconfig modules
-- Advanced plugin system (YAML + WASM + native)
+- Plugin system: WASM + native runtimes (YAML HTTP checks already shipped)
 - Scheduled / continuous scanning mode
 - PDF + HTML executive-summary export; Jira/Linear ticket creation
 - Signed, packaged builds for Windows, macOS, Linux (system tray, native menus)

@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
+
+mod plugins;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::time::Duration;
@@ -808,6 +810,67 @@ async fn ollama_models(endpoint: String) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// List the YAML check plugins currently installed in the app's plugins dir.
+#[tauri::command]
+async fn list_plugins(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    let dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("plugins");
+    let checks = plugins::load_plugins(&dir);
+    Ok(checks
+        .iter()
+        .map(|c| serde_json::json!({ "id": c.id, "name": c.name, "severity": c.severity, "path": c.request.path }))
+        .collect())
+}
+
+/// Run every installed plugin check against a target, emitting a finding per
+/// match. Returns the number of matches.
+#[tauri::command]
+async fn run_plugin_checks(app: tauri::AppHandle, scan_id: String, target: String) -> Result<usize, String> {
+    validate_target(&target)?;
+    let dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("plugins");
+    let checks = plugins::load_plugins(&dir);
+    if checks.is_empty() {
+        return Ok(0);
+    }
+
+    let base = if target.starts_with("http") { target.clone() } else { format!("http://{}", target) };
+    let base = base.trim_end_matches('/').to_string();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .user_agent("Spectra/0.1")
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut matched = 0usize;
+    for check in &checks {
+        let path = if check.request.path.starts_with('/') {
+            check.request.path.clone()
+        } else {
+            format!("/{}", check.request.path)
+        };
+        let url = format!("{}{}", base, path);
+        let method = check.request.method.clone().unwrap_or_else(|| "GET".into()).to_uppercase();
+        let req = match method.as_str() {
+            "POST" => client.post(&url),
+            "HEAD" => client.head(&url),
+            _ => client.get(&url),
+        };
+        if let Ok(resp) = req.send().await {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            if plugins::check_matches(check, status, &body) {
+                matched += 1;
+                let _ = app.emit("scan-event", ScanEvent {
+                    scan_id: scan_id.clone(),
+                    event_type: "finding".into(),
+                    data: plugins::check_to_finding(check, &url),
+                });
+            }
+        }
+    }
+    Ok(matched)
+}
+
 #[tauri::command]
 async fn cancel_real_scan(
     app: tauri::AppHandle,
@@ -1011,6 +1074,11 @@ pub fn run() {
             import_legacy_json(&mut conn, &dir); // best-effort migration from the old JSON files
             app.manage(Db(Mutex::new(conn)));
 
+            // Seed example YAML check plugins on first run.
+            let plugins_dir = dir.join("plugins");
+            std::fs::create_dir_all(&plugins_dir).ok();
+            plugins::seed_example_plugins(&plugins_dir);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1024,6 +1092,8 @@ pub fn run() {
             save_scan,
             load_scans,
             delete_scan,
+            list_plugins,
+            run_plugin_checks,
             cancel_real_scan,
         ])
         .run(tauri::generate_context!())
