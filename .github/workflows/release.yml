@@ -1,0 +1,86 @@
+name: Release
+
+# Tag-gated release: push a tag like `v0.1.0` (or run manually with a tag input)
+# to build the desktop app on all three OSes and publish a draft GitHub Release
+# with the installers attached.
+#
+# Code-signing is OPT-IN: the env vars below read from repository secrets. When a
+# secret is absent it resolves to an empty string and the build is produced
+# UNSIGNED (works fine for local/dev distribution). To ship signed builds, add
+# the relevant secrets — see "Signing" in the comments at the bottom.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  release:
+    name: Release (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS code-signing + notarization (optional)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri updater signature (optional)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: 'Spectra ${{ github.event.inputs.tag || github.ref_name }}'
+          releaseBody: 'Download the installer for your platform below. These builds are unsigned unless signing secrets are configured.'
+          releaseDraft: true
+          prerelease: false
+
+# ── Signing setup (to produce signed/notarized builds) ───────────────────────
+# macOS: add APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
+#   APPLE_SIGNING_IDENTITY, and for notarization APPLE_ID, APPLE_PASSWORD
+#   (app-specific), APPLE_TEAM_ID.
+# Windows: code-signing needs a certificate configured via
+#   `bundle.windows.certificateThumbprint` (+ the cert available on the runner)
+#   in src-tauri/tauri.conf.json — it is not driven purely by env vars.
+# Updater: TAURI_SIGNING_PRIVATE_KEY (+ password) signs update artifacts; only
+#   needed once the auto-updater is enabled.
