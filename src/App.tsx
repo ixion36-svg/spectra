@@ -16,6 +16,7 @@ import { exportFindings as exportFindingsFile, type ExportFormat } from './lib/e
 import {
   isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative, deleteScan as deleteScanNative,
   tcpPortScan, runExternalScan, httpProbe, cancelRealScan, ollamaGenerateStream, ollamaModels as ollamaModelsNative, listenScanEvents,
+  listPlugins, runPluginChecks, type PluginInfo,
 } from './lib/tauri'
 // Lazy-loaded: @xyflow/react is heavy and only needed on the Attack Graph view,
 // so it loads on demand instead of bloating the initial bundle.
@@ -108,6 +109,7 @@ function App() {
   useEffect(() => { localStorage.setItem('spectra_ollama_endpoint', ollamaEndpoint) }, [ollamaEndpoint])
 
   const [realTools, setRealTools] = useState<ToolStatus[]>([])
+  const [plugins, setPlugins] = useState<PluginInfo[]>([])
   const [useRealEngine, setUseRealEngine] = useState(true)
   const [realScanActive, setRealScanActive] = useState(false)
   const realScanActiveRef = useRef(false)
@@ -159,6 +161,7 @@ function App() {
   useEffect(() => {
     if (!isTauriEnv) return
     detectInstalledTools().then(setRealTools).catch(() => {})
+    listPlugins().then(setPlugins).catch(() => {})
     loadScansNative()
       .then((loaded) => {
         if (!loaded?.length) return
@@ -298,6 +301,9 @@ function App() {
         for (const tool of secondaryTools) {
           jobs.push(runExternalScan(id, tool, target, []).catch((e) => console.warn(`${tool} error`, e)))
         }
+        if (plugins.length > 0) {
+          jobs.push(runPluginChecks(id, target).catch((e) => console.warn('Plugin checks error', e)))
+        }
 
         if (target.includes('http') || target.includes('.')) {
           jobs.push(
@@ -341,7 +347,7 @@ function App() {
       engine.start(targets, newProfile, id)
       toast('Simulated scan started', { description: 'Demo data — enable real tools in the desktop app for live results.' })
     }
-  }, [newTargets, newProfile, newScanName, realTools, useRealEngine, growGraph, finishScan])
+  }, [newTargets, newProfile, newScanName, realTools, plugins, useRealEngine, growGraph, finishScan])
 
   const cancelScan = useCallback(() => {
     if (!activeScanId) return
@@ -915,8 +921,19 @@ function App() {
                 </div>
                 <div>
                   <div className="font-semibold mb-1">External Tool Integration</div>
-                  <div className="text-[#71717a]">In the Tauri desktop app, Spectra auto-detects nmap, nuclei and trivy and orchestrates them, enriching results with correlation + LLM analysis.</div>
+                  <div className="text-[#71717a]">In the Tauri desktop app, Spectra auto-detects nmap, nuclei, trivy and osv-scanner and orchestrates them, enriching results with correlation + LLM analysis.</div>
                 </div>
+                {isTauriEnv && (
+                  <div>
+                    <div className="font-semibold mb-1">Check Plugins (YAML)</div>
+                    <div className="text-[#71717a] mb-2">Drop <span className="font-mono text-[10px]">*.yaml</span> HTTP checks into the app's <span className="font-mono text-[10px]">plugins/</span> folder — they run on every scan. {plugins.length === 0 ? 'No plugins loaded.' : `${plugins.length} loaded:`}</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {plugins.map((p) => (
+                        <span key={p.id} className={`status-pill status-open`} title={`${p.severity} • ${p.path}`}>{p.name}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div>
                   <div className="font-semibold mb-1">Data</div>
                   <button onClick={() => { localStorage.clear(); window.location.reload() }} className="btn btn-ghost text-xs">Clear all local scans &amp; data</button>
