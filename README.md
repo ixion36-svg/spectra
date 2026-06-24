@@ -1,5 +1,7 @@
 # Spectra
 
+[![CI](https://github.com/ixion36-svg/spectra/actions/workflows/ci.yml/badge.svg)](https://github.com/ixion36-svg/spectra/actions/workflows/ci.yml)
+
 **A modern vulnerability scanner with a beautiful GUI and capabilities that go far beyond traditional tools.**
 
 > See what others miss. Correlate. Analyze with local AI. Visualize attack paths. Extensible by design.
