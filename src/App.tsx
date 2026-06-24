@@ -708,6 +708,7 @@ function App() {
                   <button onClick={() => exportFindings('json')} className="btn btn-ghost text-xs"><Download size={14} /> JSON</button>
                   <button onClick={() => exportFindings('csv')} className="btn btn-ghost text-xs"><Download size={14} /> CSV</button>
                   <button onClick={() => exportFindings('md')} className="btn btn-ghost text-xs"><Download size={14} /> Markdown</button>
+                  <button onClick={() => exportFindings('html')} className="btn btn-ghost text-xs"><Download size={14} /> HTML</button>
                   <button onClick={() => exportFindings('sarif')} className="btn btn-ghost text-xs"><Download size={14} /> SARIF</button>
                 </div>
               </div>
@@ -855,10 +856,11 @@ function App() {
             <div className="max-w-2xl">
               <h2 className="text-white text-2xl mb-4 tracking-tight">Report — {activeScan.name}</h2>
               <div className="card p-6 space-y-4">
-                <button onClick={() => exportFindings('md')} className="btn btn-primary w-full">Export Full Markdown Report</button>
+                <button onClick={() => exportFindings('html')} className="btn btn-primary w-full">Export HTML Executive Summary (print to PDF)</button>
+                <button onClick={() => exportFindings('md')} className="btn btn-secondary w-full">Export Full Markdown Report</button>
                 <button onClick={() => exportFindings('json')} className="btn btn-secondary w-full">Export Machine-Readable JSON</button>
                 <button onClick={() => exportFindings('sarif')} className="btn btn-secondary w-full">Export SARIF 2.1 (DefectDojo, GitHub code scanning)</button>
-                <div className="text-xs text-[#52525b] pt-2">Roadmap: PDF, HTML executive summary, Jira ticket creation.</div>
+                <div className="text-xs text-[#52525b] pt-2">Tip: open the HTML report and use your browser's Print → Save as PDF.</div>
               </div>
             </div>
           )}
