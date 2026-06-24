@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef, lazy, Suspense } from 'react'
 import {
-  Shield, BarChart3, GitBranch, Bot, FileText, Settings, Play, Square, Trash2, Download, Search, Plus, X, AlertTriangle, Cpu, FlaskConical,
+  Shield, BarChart3, GitBranch, Bot, FileText, Settings, Play, Square, Trash2, Download, Search, Plus, X, AlertTriangle, Cpu, FlaskConical, Repeat,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { toast } from 'sonner'
@@ -47,6 +47,8 @@ function App() {
   const [newTargets, setNewTargets] = useState('https://example.com\n10.10.14.7')
   const [newProfile, setNewProfile] = useState('Web Application + AI')
   const [newScanName, setNewScanName] = useState('External perimeter assessment')
+  const [newRepeatMinutes, setNewRepeatMinutes] = useState(0) // 0 = one-off
+  const [continuous, setContinuous] = useState<{ targets: string[]; profile: string; name: string; minutes: number } | null>(null)
 
   const activeScan = useMemo(() => scans.find((s) => s.id === activeScanId) || null, [scans, activeScanId])
   const hasSimulated = useMemo(() => !!activeScan?.findings.some((f) => f.source === 'simulator'), [activeScan])
@@ -116,6 +118,10 @@ function App() {
   useEffect(() => {
     realScanActiveRef.current = realScanActive
   }, [realScanActive])
+  const isScanningRef = useRef(false)
+  useEffect(() => {
+    isScanningRef.current = isScanning
+  }, [isScanning])
 
   const engineRef = useRef<SpectraEngine | null>(null)
   // Scan ids that have reached a terminal state, so a late completion can't
@@ -253,23 +259,21 @@ function App() {
     }
   }, [scans, activeScanId])
 
-  const startNewScan = useCallback(async () => {
-    const targets = newTargets.split('\n').map((t) => t.trim()).filter(Boolean)
-    if (targets.length === 0) {
-      toast.error('Add at least one target')
-      return
-    }
+  const launchScan = useCallback(async (cfg: { targets: string[]; profile: string; name: string; repeatMinutes?: number }) => {
+    const { targets, profile } = cfg
+    if (targets.length === 0) return
 
     const id = 'scan_' + Date.now().toString(36)
     const newScan: Scan = {
       id,
-      name: newScanName || `Scan ${format(new Date(), 'yyyy-MM-dd HH:mm')}`,
+      name: cfg.name || `Scan ${format(new Date(), 'yyyy-MM-dd HH:mm')}`,
       targets,
-      profile: newProfile,
+      profile,
       status: 'running',
       startedAt: new Date().toISOString(),
       findings: [],
       progress: 0,
+      repeatMinutes: cfg.repeatMinutes,
     }
 
     setScans((prev) => [newScan, ...prev])
@@ -344,10 +348,26 @@ function App() {
         (asset, port, service) => growGraph({ asset, port, service, source: 'simulator' } as Finding),
       )
       engineRef.current = engine
-      engine.start(targets, newProfile, id)
+      engine.start(targets, profile, id)
       toast('Simulated scan started', { description: 'Demo data — enable real tools in the desktop app for live results.' })
     }
-  }, [newTargets, newProfile, newScanName, realTools, plugins, useRealEngine, growGraph, finishScan])
+  }, [realTools, plugins, useRealEngine, growGraph, finishScan])
+
+  // Parse the New Scan form and launch; arm continuous mode if a repeat is set.
+  const startNewScan = useCallback(() => {
+    const targets = newTargets.split('\n').map((t) => t.trim()).filter(Boolean)
+    if (targets.length === 0) {
+      toast.error('Add at least one target')
+      return
+    }
+    launchScan({ targets, profile: newProfile, name: newScanName, repeatMinutes: newRepeatMinutes || undefined })
+    if (newRepeatMinutes > 0) {
+      setContinuous({ targets, profile: newProfile, name: newScanName, minutes: newRepeatMinutes })
+      toast('Continuous mode on', { description: `Re-scanning every ${newRepeatMinutes} min` })
+    } else {
+      setContinuous(null)
+    }
+  }, [newTargets, newProfile, newScanName, newRepeatMinutes, launchScan])
 
   const cancelScan = useCallback(() => {
     if (!activeScanId) return
@@ -361,6 +381,17 @@ function App() {
       finishScan(activeScan.id, 'completed')
     }
   }, [activeScan, finishScan])
+
+  // Continuous mode: re-launch the configured scan on an interval, skipping a
+  // tick if a scan is still running (no overlap).
+  useEffect(() => {
+    if (!continuous) return
+    const iv = setInterval(() => {
+      if (isScanningRef.current) return
+      launchScan({ targets: continuous.targets, profile: continuous.profile, name: continuous.name, repeatMinutes: continuous.minutes })
+    }, continuous.minutes * 60_000)
+    return () => clearInterval(iv)
+  }, [continuous, launchScan])
 
   const deleteScan = (id: string) => {
     if (activeScanId === id) {
@@ -612,6 +643,17 @@ function App() {
           </div>
         )}
 
+        {/* Continuous-scanning banner */}
+        {continuous && (
+          <div className="bg-[#0f1a14] border-b border-[#1f4a32] px-5 py-2 text-xs flex items-center gap-2 text-[#86efac]">
+            <Repeat size={14} />
+            <span><strong>Continuous monitoring</strong> — re-scanning {continuous.targets.length} target{continuous.targets.length > 1 ? 's' : ''} every {continuous.minutes} min.</span>
+            <button onClick={() => { setContinuous(null); toast('Continuous mode stopped') }} className="btn btn-ghost text-xs ml-auto py-0.5">
+              <Square size={12} /> Stop
+            </button>
+          </div>
+        )}
+
         {isTauriEnv && (
           <div className="bg-[#0f1a1f] border-b border-[#1f3a42] px-5 py-1.5 text-xs flex items-center gap-3 text-[#67e8f9]">
             <Cpu size={13} />
@@ -695,6 +737,20 @@ function App() {
                   <div className="grid grid-cols-2 gap-2">
                     {['Quick Recon', 'Web Application', 'Network + Services', 'Web Application + AI', 'Deep + AI Augmented', 'Custom (all checks)'].map((p) => (
                       <button key={p} onClick={() => setNewProfile(p)} className={`btn justify-start text-left h-auto py-3 ${newProfile === p ? 'btn-primary' : 'btn-secondary'}`}>{p}</button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs uppercase tracking-widest mb-2 text-[#52525b]">Repeat — continuous monitoring</div>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { label: 'One-off', m: 0 },
+                      { label: 'Every 15 min', m: 15 },
+                      { label: 'Every 30 min', m: 30 },
+                      { label: 'Hourly', m: 60 },
+                      { label: 'Every 6 h', m: 360 },
+                    ].map((opt) => (
+                      <button key={opt.m} onClick={() => setNewRepeatMinutes(opt.m)} className={`btn text-xs ${newRepeatMinutes === opt.m ? 'btn-primary' : 'btn-secondary'}`}>{opt.label}</button>
                     ))}
                   </div>
                 </div>
