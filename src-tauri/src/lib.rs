@@ -45,7 +45,7 @@ struct Db(Mutex<rusqlite::Connection>);
 
 #[tauri::command]
 async fn detect_installed_tools(app: tauri::AppHandle) -> Result<Vec<ToolStatus>, String> {
-    let tools = vec!["nmap", "nuclei", "trivy"];
+    let tools = vec!["nmap", "nuclei", "trivy", "osv-scanner"];
     let mut results = Vec::new();
 
     for tool in tools {
@@ -54,6 +54,7 @@ async fn detect_installed_tools(app: tauri::AppHandle) -> Result<Vec<ToolStatus>
             "nuclei" => check_tool("nuclei", vec!["-version"]).await,
             "trivy" => check_tool("trivy", vec!["version"]).await,
             "nmap" => check_tool("nmap", vec!["-V"]).await,
+            "osv-scanner" => check_tool("osv-scanner", vec!["--version"]).await,
             _ => (false, None, None),
         };
 
@@ -160,6 +161,7 @@ async fn run_external_scan(
         "nuclei" => "nuclei",
         "trivy" => "trivy",
         "nmap" => "nmap",
+        "osv-scanner" => "osv-scanner",
         _ => &tool,
     };
 
@@ -184,13 +186,19 @@ async fn run_external_scan(
         "nmap" => {
             cmd.arg("-sV").arg("-T4").arg("-Pn").arg(&target);
         }
+        "osv-scanner" => {
+            // Recursively scan a directory/repo for vulnerable dependencies (SCA),
+            // emitting a single JSON document. Exits non-zero when vulns are found
+            // — that's expected; we still read stdout.
+            cmd.arg("--format").arg("json").arg("-r").arg(&target);
+        }
         _ => {
             cmd.args(&extra_args);
             cmd.arg(&target);
         }
     }
 
-    if !extra_args.is_empty() && !matches!(tool.as_str(), "nuclei" | "trivy" | "nmap") {
+    if !extra_args.is_empty() && !matches!(tool.as_str(), "nuclei" | "trivy" | "nmap" | "osv-scanner") {
         cmd.args(&extra_args);
     }
 
@@ -282,6 +290,34 @@ async fn run_external_scan(
                                     event_type: "finding".into(),
                                     data: fdata,
                                 });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // OSV-Scanner: results[].packages[].vulnerabilities[] (one JSON document).
+    if tool == "osv-scanner" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&stdout_full) {
+            if let Some(results) = val.get("results").and_then(|r| r.as_array()) {
+                for res in results {
+                    if let Some(packages) = res.get("packages").and_then(|p| p.as_array()) {
+                        for pkg in packages {
+                            let p = pkg.get("package");
+                            let name = p.and_then(|x| x.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+                            let version = p.and_then(|x| x.get("version")).and_then(|n| n.as_str()).unwrap_or("");
+                            if let Some(vulns) = pkg.get("vulnerabilities").and_then(|v| v.as_array()) {
+                                for v in vulns {
+                                    if let Some(fdata) = map_osv_to_finding(v, name, version, &target) {
+                                        let _ = app.emit("scan-event", ScanEvent {
+                                            scan_id: scan_id.clone(),
+                                            event_type: "finding".into(),
+                                            data: fdata,
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -534,6 +570,68 @@ fn map_trivy_to_finding(v: &serde_json::Value, target: &str) -> Option<serde_jso
         "exploitability": exploit,
         "cwe": v.get("CweIDs").cloned().unwrap_or(serde_json::json!([])),
         "cve": v.get("VulnerabilityID").and_then(|x| x.as_str()).map(|s| vec![s]).unwrap_or(vec![]),
+    }))
+}
+
+/// Map an OSV-Scanner vulnerability (Software Composition Analysis) into a Finding.
+fn map_osv_to_finding(vuln: &serde_json::Value, pkg_name: &str, version: &str, target: &str) -> Option<serde_json::Value> {
+    let id = vuln.get("id").and_then(|x| x.as_str()).unwrap_or("OSV advisory");
+    let title = if pkg_name.is_empty() { id.to_string() } else { format!("{} in {}", id, pkg_name) };
+
+    // GHSA advisories expose database_specific.severity; default to medium since
+    // OSV only reports genuine vulnerabilities.
+    let sev_raw = vuln
+        .get("database_specific")
+        .and_then(|d| d.get("severity"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let severity = match sev_raw.as_str() {
+        "critical" => "critical",
+        "high" => "high",
+        "moderate" | "medium" => "medium",
+        "low" => "low",
+        _ => "medium",
+    };
+
+    let summary = vuln.get("summary").and_then(|x| x.as_str()).unwrap_or("");
+    let details = vuln.get("details").and_then(|x| x.as_str()).unwrap_or("");
+    let description = if summary.is_empty() {
+        details.chars().take(400).collect::<String>()
+    } else {
+        summary.to_string()
+    };
+
+    let cves: Vec<String> = vuln
+        .get("aliases")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| s.starts_with("CVE-"))
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let exploit = match severity {
+        "critical" => 85,
+        "high" => 70,
+        "medium" => 50,
+        _ => 40,
+    };
+
+    Some(serde_json::json!({
+        "source": "osv-scanner",
+        "title": title,
+        "severity": severity,
+        "asset": target,
+        "evidence": format!("Package {} {} — advisory {}", pkg_name, version, id),
+        "description": description,
+        "recommendation": "Upgrade the affected dependency to a fixed version. Review the OSV/GHSA advisory for patched releases.",
+        "tags": ["osv", "dependency", "sca"],
+        "exploitability": exploit,
+        "cve": cves,
     }))
 }
 
@@ -935,6 +1033,31 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn osv_mapping_builds_finding_with_cve_alias() {
+        let vuln = serde_json::json!({
+            "id": "GHSA-aaaa-bbbb-cccc",
+            "summary": "Prototype pollution in lodash",
+            "aliases": ["CVE-2021-23337", "GHSA-aaaa-bbbb-cccc"],
+            "database_specific": { "severity": "HIGH" }
+        });
+        let f = map_osv_to_finding(&vuln, "lodash", "4.17.0", "/repo").expect("should map");
+        assert_eq!(f["title"], "GHSA-aaaa-bbbb-cccc in lodash");
+        assert_eq!(f["severity"], "high");
+        assert_eq!(f["source"], "osv-scanner");
+        assert_eq!(f["asset"], "/repo");
+        assert_eq!(f["cve"][0], "CVE-2021-23337"); // CVE extracted from aliases
+        assert_eq!(f["exploitability"], 70);
+    }
+
+    #[test]
+    fn osv_mapping_defaults_unknown_severity_to_medium() {
+        let vuln = serde_json::json!({ "id": "OSV-1", "summary": "x" });
+        let f = map_osv_to_finding(&vuln, "pkg", "1.0", "/repo").unwrap();
+        assert_eq!(f["severity"], "medium"); // OSV only reports real vulns
+        assert_eq!(f["cve"].as_array().unwrap().len(), 0);
+    }
 
     #[test]
     fn sqlite_roundtrip_preserves_scan_and_findings() {

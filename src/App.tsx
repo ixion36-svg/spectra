@@ -273,7 +273,10 @@ function App() {
 
     if (isTauriEnv && useRealEngine) {
       setRealScanActive(true)
-      const bestTool = realTools.find((t) => t.available && ['trivy', 'nmap'].includes(t.name))?.name
+      // Run every available secondary tool (SCA + service detection), not just one.
+      const secondaryTools = realTools
+        .filter((t) => t.available && ['trivy', 'nmap', 'osv-scanner'].includes(t.name))
+        .map((t) => t.name)
 
       // Fan out every native job across ALL targets; the scan is "complete" only
       // once every job settles (resolved or rejected), so a single tool finishing
@@ -283,7 +286,9 @@ function App() {
         const host = target.replace(/^https?:\/\//, '').split('/')[0]
         jobs.push(tcpPortScan(id, host, COMMON_PORTS, 80).catch((e) => console.warn('TCP scan error', e)))
         jobs.push(runExternalScan(id, 'nuclei', target, []).catch((e) => console.warn('Nuclei error', e)))
-        if (bestTool) jobs.push(runExternalScan(id, bestTool, target, []).catch((e) => console.warn('Secondary tool error', e)))
+        for (const tool of secondaryTools) {
+          jobs.push(runExternalScan(id, tool, target, []).catch((e) => console.warn(`${tool} error`, e)))
+        }
 
         if (target.includes('http') || target.includes('.')) {
           jobs.push(
@@ -312,7 +317,7 @@ function App() {
 
       Promise.allSettled(jobs).then(() => finishScan(id, 'completed'))
       toast('Native scan started', {
-        description: `${targets.length} target${targets.length > 1 ? 's' : ''} • ${bestTool ? `nuclei + ${bestTool} + Rust TCP` : 'nuclei + Rust TCP'}`,
+        description: `${targets.length} target${targets.length > 1 ? 's' : ''} • ${['nuclei', ...secondaryTools, 'Rust TCP'].join(' + ')}`,
       })
     } else {
       const engine = new SpectraEngine(
