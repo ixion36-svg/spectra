@@ -96,6 +96,14 @@ that calls them is `src/lib/tauri.ts`. Security posture: a strict CSP, no
 shell-plugin surface (process execution is native Rust, not exposed to the
 webview), and scan-target validation against argument injection.
 
+## Releases
+
+Push a tag (`git tag v0.1.0 && git push --tags`) — the [release workflow](.github/workflows/release.yml)
+builds the desktop app on Windows, macOS and Linux and publishes a **draft** GitHub
+Release with the installers attached. Builds are **unsigned** until signing secrets
+are configured (see the comments in the workflow for the macOS / Windows / updater
+secrets); the per-push [CI](.github/workflows/ci.yml) build is always unsigned.
+
 ## Safety & Ethics
 
 Spectra is a tool for **authorized** security assessments, red teaming, purple teaming, and defensive engineering only.
