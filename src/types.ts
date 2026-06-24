@@ -48,6 +48,7 @@ export interface Finding {
   exploitability?: number // 0-100 "beyond normal" score
   source?: string // 'nuclei' | 'trivy' | 'rust-tcp' | 'rust-http' | 'simulator'
   status?: TriageStatus // analyst triage state; defaults to 'open'
+  duplicates?: number // UI-only: count of identical findings collapsed into this one (transient)
 }
 
 export type View = 'dashboard' | 'new' | 'findings' | 'graph' | 'ai' | 'reports' | 'settings'

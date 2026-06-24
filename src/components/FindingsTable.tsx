@@ -74,7 +74,14 @@ export function FindingsTable({
                   }}
                 >
                   <div><SeverityBadge sev={f.severity} /></div>
-                  <div className="font-medium text-white truncate" title={f.title}>{f.title}</div>
+                  <div className="font-medium text-white truncate flex items-center gap-1.5" title={f.title}>
+                    <span className="truncate">{f.title}</span>
+                    {f.duplicates ? (
+                      <span className="shrink-0 text-[10px] font-mono px-1.5 py-px rounded bg-[#24262f] text-[#a1a1aa]" title={`${f.duplicates} duplicate${f.duplicates > 1 ? 's' : ''} collapsed`}>
+                        ×{f.duplicates + 1}
+                      </span>
+                    ) : null}
+                  </div>
                   <div className="font-mono text-xs text-[#ededf0] truncate" title={f.asset}>{f.asset}</div>
                   <div className="font-mono text-xs">
                     {f.port || '—'} {f.service && <span className="text-[#52525b]">/ {f.service}</span>}
