@@ -8,6 +8,7 @@ use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 
 mod plugins;
+pub mod vuln_db;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::time::Duration;
@@ -810,6 +811,40 @@ async fn ollama_models(endpoint: String) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// CVE store stats (how many CVE rows + KEV entries are loaded).
+#[tauri::command]
+async fn cve_stats(db: tauri::State<'_, Db>) -> Result<serde_json::Value, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let cve = vuln_db::cve_count(&conn).map_err(|e| e.to_string())?;
+    let kev = vuln_db::kev_count(&conn).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "cve_rows": cve, "kev_entries": kev }))
+}
+
+/// Match a detected product + version against the CVE store.
+#[tauri::command]
+async fn match_service_cves(
+    product: String,
+    version: String,
+    db: tauri::State<'_, Db>,
+) -> Result<Vec<vuln_db::CveMatch>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    vuln_db::match_cves(&conn, &product, &version).map_err(|e| e.to_string())
+}
+
+/// Import an NVD CVE feed (JSON, API 2.0 shape). Returns rows inserted.
+#[tauri::command]
+async fn import_cve_feed(json: String, db: tauri::State<'_, Db>) -> Result<usize, String> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    vuln_db::import_nvd_json(&mut conn, &json)
+}
+
+/// Import the CISA KEV (Known Exploited Vulnerabilities) catalog JSON. Returns entries inserted.
+#[tauri::command]
+async fn import_kev_feed(json: String, db: tauri::State<'_, Db>) -> Result<usize, String> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    vuln_db::import_kev_json(&mut conn, &json)
+}
+
 /// List the YAML check plugins currently installed in the app's plugins dir.
 #[tauri::command]
 async fn list_plugins(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
@@ -1072,6 +1107,9 @@ pub fn run() {
             let mut conn = rusqlite::Connection::open(dir.join("spectra.db")).map_err(|e| e.to_string())?;
             init_schema(&conn).map_err(|e| e.to_string())?;
             import_legacy_json(&mut conn, &dir); // best-effort migration from the old JSON files
+            // CVE matching store (seeded with well-known CVEs until a full NVD feed is imported).
+            vuln_db::init_cve_schema(&conn).map_err(|e| e.to_string())?;
+            vuln_db::seed_known_cves(&mut conn).map_err(|e| e.to_string())?;
             app.manage(Db(Mutex::new(conn)));
 
             // Seed example YAML check plugins on first run.
@@ -1094,6 +1132,10 @@ pub fn run() {
             delete_scan,
             list_plugins,
             run_plugin_checks,
+            cve_stats,
+            match_service_cves,
+            import_cve_feed,
+            import_kev_feed,
             cancel_real_scan,
         ])
         .run(tauri::generate_context!())
