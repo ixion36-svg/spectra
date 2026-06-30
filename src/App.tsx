@@ -17,6 +17,7 @@ import {
   isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative, deleteScan as deleteScanNative,
   tcpPortScan, runExternalScan, httpProbe, cveScanBanner, cancelRealScan, ollamaGenerateStream, ollamaModels as ollamaModelsNative, listenScanEvents,
   listPlugins, runPluginChecks, type PluginInfo,
+  cveStats, matchServiceCves, updateKevFeed, type CveMatch,
 } from './lib/tauri'
 // Lazy-loaded: @xyflow/react is heavy and only needed on the Attack Graph view,
 // so it loads on demand instead of bloating the initial bundle.
@@ -112,6 +113,13 @@ function App() {
 
   const [realTools, setRealTools] = useState<ToolStatus[]>([])
   const [plugins, setPlugins] = useState<PluginInfo[]>([])
+
+  // Vulnerability DB (CVE + KEV) state.
+  const [vulnStats, setVulnStats] = useState<{ cve_rows: number; kev_entries: number } | null>(null)
+  const [kevUpdating, setKevUpdating] = useState(false)
+  const [cveProduct, setCveProduct] = useState('http_server')
+  const [cveVersion, setCveVersion] = useState('2.4.49')
+  const [cveResults, setCveResults] = useState<CveMatch[] | null>(null)
   const [useRealEngine, setUseRealEngine] = useState(true)
   const [realScanActive, setRealScanActive] = useState(false)
   const realScanActiveRef = useRef(false)
@@ -168,6 +176,7 @@ function App() {
     if (!isTauriEnv) return
     detectInstalledTools().then(setRealTools).catch(() => {})
     listPlugins().then(setPlugins).catch(() => {})
+    cveStats().then(setVulnStats).catch(() => {})
     loadScansNative()
       .then((loaded) => {
         if (!loaded?.length) return
@@ -532,6 +541,28 @@ function App() {
       }
     } catch {
       toast.error('Could not reach Ollama', { description: ollamaEndpoint })
+    }
+  }
+
+  const updateKev = async () => {
+    setKevUpdating(true)
+    try {
+      const n = await updateKevFeed()
+      toast.success(`KEV catalog updated`, { description: `${n} actively-exploited CVEs loaded` })
+      setVulnStats(await cveStats())
+    } catch (e) {
+      toast.error('KEV update failed', { description: String(e) })
+    } finally {
+      setKevUpdating(false)
+    }
+  }
+
+  const runCveLookup = async () => {
+    if (!cveProduct.trim() || !cveVersion.trim()) return
+    try {
+      setCveResults(await matchServiceCves(cveProduct.trim(), cveVersion.trim()))
+    } catch (e) {
+      toast.error('CVE lookup failed', { description: String(e) })
     }
   }
 
@@ -991,6 +1022,40 @@ function App() {
                         <span key={p.id} className={`status-pill status-open`} title={`${p.severity} • ${p.path}`}>{p.name}</span>
                       ))}
                     </div>
+                  </div>
+                )}
+                {isTauriEnv && (
+                  <div>
+                    <div className="font-semibold mb-1">Vulnerability Database (CVE + CISA KEV)</div>
+                    <div className="text-[#71717a] mb-2">
+                      Offline CVE matching. {vulnStats ? <><span className="font-mono text-[#a1a1aa]">{vulnStats.cve_rows.toLocaleString()}</span> CVE rows, <span className="font-mono text-[#a1a1aa]">{vulnStats.kev_entries.toLocaleString()}</span> KEV entries</> : 'loading…'}
+                    </div>
+                    <div className="flex items-center gap-2 mb-3">
+                      <button onClick={updateKev} disabled={kevUpdating} className="btn btn-secondary text-xs">{kevUpdating ? 'Updating…' : 'Update KEV catalog'}</button>
+                      <span className="text-[10px] text-[#52525b]">fetches the latest CISA Known Exploited Vulnerabilities feed</span>
+                    </div>
+                    <div className="text-[10px] uppercase tracking-widest text-[#52525b] mb-1.5">CVE lookup</div>
+                    <div className="flex gap-2 mb-2">
+                      <input className="input text-xs font-mono" value={cveProduct} onChange={(e) => setCveProduct(e.target.value)} placeholder="product (e.g. http_server)" />
+                      <input className="input text-xs font-mono w-32" value={cveVersion} onChange={(e) => setCveVersion(e.target.value)} placeholder="version" onKeyDown={(e) => e.key === 'Enter' && runCveLookup()} />
+                      <button onClick={runCveLookup} className="btn btn-secondary text-xs whitespace-nowrap">Look up</button>
+                    </div>
+                    {cveResults && (
+                      <div className="space-y-1.5">
+                        {cveResults.length === 0 && <div className="text-xs text-[#52525b]">No known CVEs for that product/version.</div>}
+                        {cveResults.map((c) => (
+                          <div key={c.cve_id} className="text-xs bg-[#12141b] border border-[#24262f] rounded p-2">
+                            <div className="flex items-center gap-2">
+                              {c.known_exploited && <span className="text-[9px] font-bold px-1.5 py-px rounded bg-[#ef4444] text-white">{c.ransomware ? 'KEV-R' : 'KEV'}</span>}
+                              <span className="font-mono text-[#ededf0]">{c.cve_id}</span>
+                              {c.cvss != null && <span className="font-mono text-[#67e8f9]">CVSS {c.cvss}</span>}
+                              {c.severity && <span className={`badge sev-${c.severity}`}>{c.severity}</span>}
+                            </div>
+                            {c.summary && <div className="text-[#71717a] mt-1">{c.summary}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
                 <div>
