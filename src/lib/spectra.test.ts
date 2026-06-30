@@ -4,6 +4,7 @@ import { hostOf } from './engine'
 import { findingsToSarif, sarifRuleId } from './sarif'
 import { findingsToHtml, escapeHtml } from './html'
 import { dedupeFindings } from './dedup'
+import { diffScans, findingKey } from './delta'
 import { normalizeSeverity, findingPayloadSchema } from '../types'
 import type { Finding, Scan } from '../types'
 
@@ -70,6 +71,50 @@ describe('dedupeFindings', () => {
   it('treats different ports as different locations', () => {
     const out = dedupeFindings([mk({ port: 80 }), mk({ port: 443 })])
     expect(out).toHaveLength(2)
+  })
+})
+
+describe('diffScans (delta reports)', () => {
+  const f = (over: Partial<Finding>): Finding => ({
+    id: Math.random().toString(), scanId: 's', severity: 'high', title: 'X', asset: 'h',
+    evidence: '', description: '', recommendation: '', discoveredAt: '', tags: [], ...over,
+  })
+  const scan = (findings: Finding[]): Scan => ({
+    id: 's', name: 'n', targets: [], profile: 'p', status: 'completed', startedAt: '', findings, progress: 100,
+  })
+
+  it('classifies added / fixed / persistent', () => {
+    const prev = scan([f({ title: 'A' }), f({ title: 'B' })])
+    const curr = scan([f({ title: 'B' }), f({ title: 'C' })])
+    const d = diffScans(prev, curr)
+    expect(d.added.map((x) => x.title)).toEqual(['C'])
+    expect(d.fixed.map((x) => x.title)).toEqual(['A'])
+    expect(d.persistent.map((x) => x.title)).toEqual(['B'])
+  })
+
+  it('keys CVE findings on cve id + asset', () => {
+    expect(findingKey(f({ title: 'whatever', cve: ['CVE-2021-1'], asset: 'h' }))).toBe('cve:cve-2021-1|h')
+    // same CVE, different title -> still the same finding
+    const prev = scan([f({ title: 'old wording', cve: ['CVE-2021-1'], asset: 'h' })])
+    const curr = scan([f({ title: 'new wording', cve: ['CVE-2021-1'], asset: 'h' })])
+    const d = diffScans(prev, curr)
+    expect(d.persistent).toHaveLength(1)
+    expect(d.added).toHaveLength(0)
+  })
+
+  it('different port = different finding', () => {
+    const prev = scan([f({ title: 'T', asset: 'h', port: 80 })])
+    const curr = scan([f({ title: 'T', asset: 'h', port: 443 })])
+    const d = diffScans(prev, curr)
+    expect(d.added).toHaveLength(1)
+    expect(d.fixed).toHaveLength(1)
+  })
+
+  it('sorts each bucket by severity', () => {
+    const prev = scan([])
+    const curr = scan([f({ title: 'lo', severity: 'low' }), f({ title: 'hi', severity: 'critical' })])
+    const d = diffScans(prev, curr)
+    expect(d.added.map((x) => x.severity)).toEqual(['critical', 'low'])
   })
 })
 

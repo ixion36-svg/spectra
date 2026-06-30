@@ -12,6 +12,7 @@ import {
 } from './types'
 import { SpectraEngine } from './lib/engine'
 import { dedupeFindings } from './lib/dedup'
+import { diffScans, deltaToMarkdown } from './lib/delta'
 import { exportFindings as exportFindingsFile, type ExportFormat } from './lib/export'
 import {
   isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative, deleteScan as deleteScanNative,
@@ -97,6 +98,14 @@ function App() {
 
   const [graphNodes, setGraphNodes] = useState<GraphNode[]>([])
   const [graphEdges, setGraphEdges] = useState<GraphEdge[]>([])
+
+  // Delta/trend reporting: compare the active scan to a chosen baseline.
+  const [baselineId, setBaselineId] = useState<string | null>(null)
+  const delta = useMemo(() => {
+    const baseline = scans.find((s) => s.id === baselineId)
+    if (!baseline || !activeScan || baseline.id === activeScan.id) return null
+    return { baseline, ...diffScans(baseline, activeScan) }
+  }, [scans, baselineId, activeScan])
 
   const [aiMessages, setAiMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([
     { role: 'assistant', content: "I'm Spectra's local co-pilot. I analyze findings, suggest attack paths, and help prioritize. If a local Ollama model is running I'll use it for real analysis — otherwise you'll get clearly-labelled demo responses." },
@@ -1062,6 +1071,72 @@ function App() {
                 <button onClick={() => exportFindings('json')} className="btn btn-secondary w-full">Export Machine-Readable JSON</button>
                 <button onClick={() => exportFindings('sarif')} className="btn btn-secondary w-full">Export SARIF 2.1 (DefectDojo, GitHub code scanning)</button>
                 <div className="text-xs text-[#52525b] pt-2">Tip: open the HTML report and use your browser's Print → Save as PDF.</div>
+              </div>
+
+              {/* Delta / trend: compare against a previous scan */}
+              <div className="card p-6 mt-4">
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <div className="font-semibold text-white">Compare to a previous scan</div>
+                  <select
+                    className="input w-56 text-xs h-8"
+                    value={baselineId ?? ''}
+                    onChange={(e) => setBaselineId(e.target.value || null)}
+                  >
+                    <option value="">Select baseline…</option>
+                    {scans.filter((s) => s.id !== activeScan.id).map((s) => (
+                      <option key={s.id} value={s.id}>{s.name} · {format(new Date(s.startedAt), 'MMM d HH:mm')}</option>
+                    ))}
+                  </select>
+                </div>
+                {!delta && <div className="text-xs text-[#52525b]">Pick a baseline scan to see what's new, fixed, and still open.</div>}
+                {delta && (
+                  <div>
+                    <div className="flex gap-3 mb-3">
+                      <div className="flex-1 text-center bg-[#16181f] border border-[#24262f] rounded-lg p-3">
+                        <div className="text-2xl font-semibold" style={{ color: 'var(--critical)' }}>{delta.added.length}</div>
+                        <div className="text-[10px] uppercase tracking-widest text-muted">New</div>
+                      </div>
+                      <div className="flex-1 text-center bg-[#16181f] border border-[#24262f] rounded-lg p-3">
+                        <div className="text-2xl font-semibold" style={{ color: 'var(--low)' }}>{delta.fixed.length}</div>
+                        <div className="text-[10px] uppercase tracking-widest text-muted">Fixed</div>
+                      </div>
+                      <div className="flex-1 text-center bg-[#16181f] border border-[#24262f] rounded-lg p-3">
+                        <div className="text-2xl font-semibold text-white">{delta.persistent.length}</div>
+                        <div className="text-[10px] uppercase tracking-widest text-muted">Still open</div>
+                      </div>
+                    </div>
+                    {([['🔺 New', delta.added], ['✅ Fixed', delta.fixed]] as const).map(([label, list]) =>
+                      list.length === 0 ? null : (
+                        <div key={label} className="mb-3">
+                          <div className="text-[10px] uppercase tracking-widest text-[#52525b] mb-1">{label} ({list.length})</div>
+                          <div className="space-y-1 max-h-40 overflow-auto">
+                            {list.slice(0, 50).map((f) => (
+                              <div key={f.id} className="text-xs flex items-center gap-2">
+                                <SeverityBadge sev={f.severity} />
+                                <span className="text-[#ededf0] truncate">{f.title}</span>
+                                <span className="font-mono text-[#52525b] truncate">{f.asset}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ),
+                    )}
+                    <button
+                      onClick={() => {
+                        const md = deltaToMarkdown(delta.baseline, activeScan, delta)
+                        const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }))
+                        const a = document.createElement('a')
+                        a.href = url
+                        a.download = `${activeScan.name.replace(/\s+/g, '-')}-delta.md`
+                        a.click()
+                        URL.revokeObjectURL(url)
+                      }}
+                      className="btn btn-secondary text-xs w-full mt-1"
+                    >
+                      Export delta report (Markdown)
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           )}
