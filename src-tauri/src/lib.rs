@@ -8,6 +8,7 @@ use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 
 mod plugins;
+pub mod auth_scan;
 pub mod vuln_db;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -912,6 +913,29 @@ async fn update_kev_feed(db: tauri::State<'_, Db>) -> Result<usize, String> {
     vuln_db::import_kev_json(&mut conn, &json)
 }
 
+/// Authenticated-scan analysis: match a host's installed-package list against
+/// the CVE store and emit CVE findings. `format` is "dpkg" | "rpm" | "generic".
+#[tauri::command]
+async fn scan_packages(
+    app: tauri::AppHandle,
+    scan_id: String,
+    asset: String,
+    packages: String,
+    format: String,
+    db: tauri::State<'_, Db>,
+) -> Result<usize, String> {
+    let parsed = auth_scan::parse_packages(&packages, auth_scan::PkgFormat::from_str(&format));
+    let findings = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        auth_scan::package_cve_findings(&conn, &parsed, &asset)
+    };
+    let n = findings.len();
+    for data in findings {
+        let _ = app.emit("scan-event", ScanEvent { scan_id: scan_id.clone(), event_type: "finding".into(), data });
+    }
+    Ok(n)
+}
+
 /// Match a detected service banner against the CVE store and emit a finding per
 /// CVE (KEV-flagged) onto the scan-event stream. Returns the number emitted.
 #[tauri::command]
@@ -1226,6 +1250,7 @@ pub fn run() {
             import_kev_feed,
             update_kev_feed,
             cve_scan_banner,
+            scan_packages,
             cancel_real_scan,
         ])
         .run(tauri::generate_context!())

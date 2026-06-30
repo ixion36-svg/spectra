@@ -194,10 +194,13 @@ pub fn cve_count(conn: &Connection) -> rusqlite::Result<i64> {
 
 fn normalize_product(token: &str) -> Vec<String> {
     match token.to_lowercase().as_str() {
-        "apache" | "httpd" | "apache-httpd" | "apache httpd" => vec!["http_server".into()],
-        "nginx" => vec!["nginx".into()],
-        "openssh" => vec!["openssh".into()],
-        "openssl" => vec!["openssl".into()],
+        // service banners / nmap product strings
+        "apache" | "httpd" | "apache-httpd" | "apache httpd" | "apache2" | "apache2-bin" => {
+            vec!["http_server".into()]
+        }
+        "nginx" | "nginx-core" | "nginx-full" => vec!["nginx".into()],
+        "openssh" | "openssh-server" | "openssh-client" | "openssh-clients" => vec!["openssh".into()],
+        "openssl" | "libssl" | "libssl1.1" | "libssl3" | "libssl1.0.0" => vec!["openssl".into()],
         "lighttpd" => vec!["lighttpd".into()],
         "microsoft-iis" | "iis" | "microsoft iis httpd" | "microsoft iis" => {
             vec!["internet_information_services".into()]
@@ -205,7 +208,8 @@ fn normalize_product(token: &str) -> Vec<String> {
         "tomcat" | "apache-coyote" | "apache tomcat" => vec!["tomcat".into()],
         "envoy" => vec!["envoy".into()],
         "uvicorn" => vec!["uvicorn".into()],
-        "node" | "node.js" => vec!["node.js".into()],
+        "node" | "node.js" | "nodejs" => vec!["node.js".into()],
+        // common package names that carry a vendor prefix
         other => vec![other.split_whitespace().next().unwrap_or(other).to_string()],
     }
 }
