@@ -118,6 +118,17 @@ export function authenticatedSshScan(
   return invoke<number>('authenticated_ssh_scan', { scanId, host, user, port: port ?? null, keyPath: keyPath || null })
 }
 
+/** CIS-aligned compliance scan over SSH; emits a pass/fail finding per check. */
+export function runComplianceSsh(
+  scanId: string,
+  host: string,
+  user: string,
+  port?: number,
+  keyPath?: string,
+): Promise<number> {
+  return invoke<number>('run_compliance_ssh', { scanId, host, user, port: port ?? null, keyPath: keyPath || null })
+}
+
 export function cancelRealScan(scanId: string): Promise<void> {
   return invoke<void>('cancel_real_scan', { scanId })
 }
