@@ -153,6 +153,7 @@ async fn run_external_scan(
     target: String,
     extra_args: Vec<String>,
     state: tauri::State<'_, RunningScans>,
+    db: tauri::State<'_, Db>,
 ) -> Result<ExternalScanResult, String> {
     let start = std::time::Instant::now();
 
@@ -187,7 +188,8 @@ async fn run_external_scan(
             cmd.args(["--exit-code", "0", "--format", "json"]);
         }
         "nmap" => {
-            cmd.arg("-sV").arg("-T4").arg("-Pn").arg(&target);
+            // -oX - emits structured XML on stdout so we can extract product+version.
+            cmd.arg("-sV").arg("-T4").arg("-Pn").arg("-oX").arg("-").arg(&target);
         }
         "osv-scanner" => {
             // Recursively scan a directory/repo for vulnerable dependencies (SCA),
@@ -323,6 +325,51 @@ async fn run_external_scan(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // nmap -sV: parse the XML, emit a service finding per open port, and CVE-match
+    // any detected product+version against the local CVE store (KEV-flagged).
+    if tool == "nmap" {
+        let services = vuln_db::parse_nmap_services(&stdout_full);
+        if !services.is_empty() {
+            // CVE matching needs the DB; lock briefly (no await held).
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            for s in services {
+                let host = if s.addr.is_empty() { target.clone() } else { s.addr.clone() };
+                let asset = format!("{}:{}", host, s.port);
+                let vers = match (&s.product, &s.version) {
+                    (Some(p), Some(v)) => format!("{} {}", p, v),
+                    (Some(p), None) => p.clone(),
+                    _ => s.name.clone(),
+                };
+                let _ = app.emit("scan-event", ScanEvent {
+                    scan_id: scan_id.clone(),
+                    event_type: "finding".into(),
+                    data: serde_json::json!({
+                        "source": "nmap",
+                        "title": format!("{} on {}/{}", vers, s.port, s.proto),
+                        "severity": "info",
+                        "asset": host,
+                        "port": s.port,
+                        "service": s.name,
+                        "evidence": format!("nmap -sV: {}/{} open ({})", s.port, s.proto, vers),
+                        "description": "Open service detected by nmap service/version detection.",
+                        "recommendation": "Confirm the service is intended to be exposed; restrict if not.",
+                        "tags": ["nmap", "service"],
+                        "exploitability": 25,
+                    }),
+                });
+                if let (Some(product), Some(version)) = (&s.product, &s.version) {
+                    for fdata in vuln_db::cve_findings_for(&conn, product, version, &asset) {
+                        let _ = app.emit("scan-event", ScanEvent {
+                            scan_id: scan_id.clone(),
+                            event_type: "finding".into(),
+                            data: fdata,
+                        });
                     }
                 }
             }

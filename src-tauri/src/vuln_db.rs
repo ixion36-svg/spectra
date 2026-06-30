@@ -194,18 +194,67 @@ pub fn cve_count(conn: &Connection) -> rusqlite::Result<i64> {
 
 fn normalize_product(token: &str) -> Vec<String> {
     match token.to_lowercase().as_str() {
-        "apache" | "httpd" | "apache-httpd" => vec!["http_server".into()],
+        "apache" | "httpd" | "apache-httpd" | "apache httpd" => vec!["http_server".into()],
         "nginx" => vec!["nginx".into()],
         "openssh" => vec!["openssh".into()],
         "openssl" => vec!["openssl".into()],
         "lighttpd" => vec!["lighttpd".into()],
-        "microsoft-iis" | "iis" => vec!["internet_information_services".into()],
-        "tomcat" | "apache-coyote" => vec!["tomcat".into()],
+        "microsoft-iis" | "iis" | "microsoft iis httpd" | "microsoft iis" => {
+            vec!["internet_information_services".into()]
+        }
+        "tomcat" | "apache-coyote" | "apache tomcat" => vec!["tomcat".into()],
         "envoy" => vec!["envoy".into()],
         "uvicorn" => vec!["uvicorn".into()],
         "node" | "node.js" => vec!["node.js".into()],
-        other => vec![other.to_string()],
+        other => vec![other.split_whitespace().next().unwrap_or(other).to_string()],
     }
+}
+
+/// Build a Spectra finding payload for a matched CVE.
+fn cve_payload(m: &CveMatch, product: &str, version: &str, asset: &str) -> serde_json::Value {
+    let mut tags = vec!["cve".to_string(), "sca".to_string()];
+    if m.known_exploited {
+        tags.push("kev".into());
+    }
+    if m.ransomware {
+        tags.push("ransomware".into());
+    }
+    let recommendation = if m.known_exploited {
+        "Actively exploited in the wild (CISA KEV) - patch immediately."
+    } else {
+        "Upgrade the affected component to a fixed version."
+    };
+    serde_json::json!({
+        "source": "cve",
+        "title": format!("{} in {} {}", m.cve_id, product, version),
+        "severity": m.severity.clone().unwrap_or_else(|| "medium".into()),
+        "asset": asset,
+        "evidence": format!(
+            "Detected {} {} matches {}{}",
+            product, version, m.cve_id,
+            if m.known_exploited { " - in CISA KEV (actively exploited)" } else { "" }
+        ),
+        "description": m.summary.clone().unwrap_or_default(),
+        "recommendation": recommendation,
+        "tags": tags,
+        "cve": [m.cve_id],
+        "exploitability": exploit_score(m),
+    })
+}
+
+/// CVE findings for a raw (un-normalized) product + version, deduped by CVE id.
+/// Used by service detectors (e.g. nmap -sV) that already have product+version.
+pub fn cve_findings_for(conn: &Connection, raw_product: &str, version: &str, asset: &str) -> Vec<serde_json::Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for product in normalize_product(raw_product) {
+        for m in match_cves(conn, &product, version).unwrap_or_default() {
+            if seen.insert(m.cve_id.clone()) {
+                out.push(cve_payload(&m, &product, version, asset));
+            }
+        }
+    }
+    out
 }
 
 /// Extract candidate (product, version) pairs from a banner string. Handles
@@ -246,39 +295,69 @@ fn exploit_score(m: &CveMatch) -> u64 {
 pub fn banner_cve_findings(conn: &Connection, banner: &str, asset: &str) -> Vec<serde_json::Value> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    // parse_banner already yields CPE-normalized product names.
     for (product, version) in parse_banner(banner) {
         for m in match_cves(conn, &product, &version).unwrap_or_default() {
-            if !seen.insert(m.cve_id.clone()) {
+            if seen.insert(m.cve_id.clone()) {
+                out.push(cve_payload(&m, &product, &version, asset));
+            }
+        }
+    }
+    out
+}
+
+// ── nmap -sV XML parsing ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NmapService {
+    pub addr: String,
+    pub port: u16,
+    pub proto: String,
+    pub name: String,
+    pub product: Option<String>,
+    pub version: Option<String>,
+}
+
+/// Parse `nmap -oX -` output into the open services it found.
+pub fn parse_nmap_services(xml: &str) -> Vec<NmapService> {
+    let doc = match roxmltree::Document::parse(xml) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for host in doc.descendants().filter(|n| n.has_tag_name("host")) {
+        let addr = host
+            .descendants()
+            .find(|n| {
+                n.has_tag_name("address")
+                    && matches!(n.attribute("addrtype"), Some("ipv4") | Some("ipv6"))
+            })
+            .and_then(|n| n.attribute("addr"))
+            .unwrap_or("")
+            .to_string();
+
+        for port in host.descendants().filter(|n| n.has_tag_name("port")) {
+            let open = port
+                .children()
+                .find(|n| n.has_tag_name("state"))
+                .and_then(|n| n.attribute("state"))
+                == Some("open");
+            if !open {
                 continue;
             }
-            let mut tags = vec!["cve".to_string(), "sca".to_string()];
-            if m.known_exploited {
-                tags.push("kev".into());
-            }
-            if m.ransomware {
-                tags.push("ransomware".into());
-            }
-            let recommendation = if m.known_exploited {
-                "Actively exploited in the wild (CISA KEV) - patch immediately."
-            } else {
-                "Upgrade the affected component to a fixed version."
+            let portid = match port.attribute("portid").and_then(|p| p.parse::<u16>().ok()) {
+                Some(p) => p,
+                None => continue,
             };
-            out.push(serde_json::json!({
-                "source": "cve",
-                "title": format!("{} in {} {}", m.cve_id, product, version),
-                "severity": m.severity.clone().unwrap_or_else(|| "medium".into()),
-                "asset": asset,
-                "evidence": format!(
-                    "Service banner '{} {}' matches {}{}",
-                    product, version, m.cve_id,
-                    if m.known_exploited { " - in CISA KEV (actively exploited)" } else { "" }
-                ),
-                "description": m.summary.clone().unwrap_or_default(),
-                "recommendation": recommendation,
-                "tags": tags,
-                "cve": [m.cve_id],
-                "exploitability": exploit_score(&m),
-            }));
+            let svc = port.children().find(|n| n.has_tag_name("service"));
+            out.push(NmapService {
+                addr: addr.clone(),
+                port: portid,
+                proto: port.attribute("protocol").unwrap_or("tcp").to_string(),
+                name: svc.and_then(|s| s.attribute("name")).unwrap_or("unknown").to_string(),
+                product: svc.and_then(|s| s.attribute("product")).map(|s| s.to_string()),
+                version: svc.and_then(|s| s.attribute("version")).map(|s| s.to_string()),
+            });
         }
     }
     out
@@ -656,6 +735,39 @@ mod tests {
         let mut conn = mem();
         seed_known_cves(&mut conn).unwrap();
         assert!(banner_cve_findings(&conn, "Apache/2.4.58", "h").is_empty());
+    }
+
+    #[test]
+    fn parses_nmap_xml_services() {
+        let xml = r#"<?xml version="1.0"?><nmaprun>
+          <host>
+            <address addr="10.0.0.5" addrtype="ipv4"/>
+            <ports>
+              <port protocol="tcp" portid="443"><state state="open"/>
+                <service name="https" product="Apache httpd" version="2.4.49" tunnel="ssl"/></port>
+              <port protocol="tcp" portid="22"><state state="open"/>
+                <service name="ssh" product="OpenSSH" version="8.5"/></port>
+              <port protocol="tcp" portid="139"><state state="closed"/>
+                <service name="netbios-ssn"/></port>
+            </ports>
+          </host>
+        </nmaprun>"#;
+        let svcs = parse_nmap_services(xml);
+        assert_eq!(svcs.len(), 2); // closed port skipped
+        let https = svcs.iter().find(|s| s.port == 443).unwrap();
+        assert_eq!(https.addr, "10.0.0.5");
+        assert_eq!(https.product.as_deref(), Some("Apache httpd"));
+        assert_eq!(https.version.as_deref(), Some("2.4.49"));
+    }
+
+    #[test]
+    fn cve_findings_for_normalizes_nmap_product() {
+        let mut conn = mem();
+        seed_known_cves(&mut conn).unwrap();
+        // nmap reports "Apache httpd"; engine normalizes to http_server and matches.
+        let f = cve_findings_for(&conn, "Apache httpd", "2.4.49", "10.0.0.5:443");
+        assert_eq!(f.len(), 2);
+        assert!(f[0]["tags"].as_array().unwrap().iter().any(|t| t == "kev"));
     }
 
     #[test]
