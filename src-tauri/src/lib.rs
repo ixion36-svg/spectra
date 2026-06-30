@@ -9,6 +9,7 @@ use tauri::{Emitter, Manager};
 
 mod plugins;
 pub mod auth_scan;
+pub mod compliance;
 pub mod vuln_db;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -984,6 +985,54 @@ async fn authenticated_ssh_scan(
     Ok(n)
 }
 
+/// CIS-aligned compliance scan over SSH: run the hardening-check profile on a
+/// host and emit a pass/fail finding per check. Credentials per-call, not stored.
+#[tauri::command]
+async fn run_compliance_ssh(
+    app: tauri::AppHandle,
+    scan_id: String,
+    host: String,
+    port: Option<u16>,
+    user: String,
+    key_path: Option<String>,
+) -> Result<usize, String> {
+    validate_target(&host)?;
+    let user = user.trim().to_string();
+    if user.is_empty() || user.contains(|c: char| c.is_whitespace() || c == '@') || user.starts_with('-') {
+        return Err("invalid SSH user".into());
+    }
+    let checks = compliance::builtin_checks();
+    // `; true` so a check command exiting non-zero (e.g. grep no-match) doesn't
+    // fail the whole ssh run; auth/connection failures still surface (exit 255).
+    let script = format!("{} ; true", compliance::build_remote_script(&checks));
+    let port = port.unwrap_or(22);
+    let args = auth_scan::build_ssh_args(&host, port, &user, key_path.as_deref(), &script);
+
+    let output = TokioCommand::new("ssh")
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("failed to run ssh (is it installed?): {}", e))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ssh failed: {}", err.lines().next().unwrap_or("connection or auth error")));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let results = compliance::evaluate_results(&checks, &stdout);
+    let asset = format!("{}@{}", user, host);
+    for r in &results {
+        let _ = app.emit("scan-event", ScanEvent {
+            scan_id: scan_id.clone(),
+            event_type: "finding".into(),
+            data: compliance::result_to_finding(r, &asset),
+        });
+    }
+    Ok(results.len())
+}
+
 /// Match a detected service banner against the CVE store and emit a finding per
 /// CVE (KEV-flagged) onto the scan-event stream. Returns the number emitted.
 #[tauri::command]
@@ -1300,6 +1349,7 @@ pub fn run() {
             cve_scan_banner,
             scan_packages,
             authenticated_ssh_scan,
+            run_compliance_ssh,
             cancel_real_scan,
         ])
         .run(tauri::generate_context!())
