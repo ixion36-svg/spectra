@@ -17,7 +17,7 @@ import {
   isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative, deleteScan as deleteScanNative,
   tcpPortScan, runExternalScan, httpProbe, cveScanBanner, cancelRealScan, ollamaGenerateStream, ollamaModels as ollamaModelsNative, listenScanEvents,
   listPlugins, runPluginChecks, type PluginInfo,
-  cveStats, matchServiceCves, updateKevFeed, type CveMatch,
+  cveStats, matchServiceCves, updateKevFeed, scanPackages, type CveMatch,
 } from './lib/tauri'
 // Lazy-loaded: @xyflow/react is heavy and only needed on the Attack Graph view,
 // so it loads on demand instead of bloating the initial bundle.
@@ -120,6 +120,10 @@ function App() {
   const [cveProduct, setCveProduct] = useState('http_server')
   const [cveVersion, setCveVersion] = useState('2.4.49')
   const [cveResults, setCveResults] = useState<CveMatch[] | null>(null)
+
+  // Authenticated-scan (paste installed packages) state.
+  const [pkgText, setPkgText] = useState('')
+  const [pkgFormat, setPkgFormat] = useState('dpkg')
   const [useRealEngine, setUseRealEngine] = useState(true)
   const [realScanActive, setRealScanActive] = useState(false)
   const realScanActiveRef = useRef(false)
@@ -566,6 +570,33 @@ function App() {
     }
   }
 
+  // Authenticated analysis: start a scan from a pasted installed-package list.
+  const analyzePackages = useCallback(async () => {
+    if (!pkgText.trim()) {
+      toast.error('Paste a package list first')
+      return
+    }
+    const id = 'scan_' + Date.now().toString(36)
+    setScans((prev) => [
+      { id, name: newScanName || 'Authenticated package analysis', targets: ['(installed packages)'], profile: `Authenticated (${pkgFormat})`, status: 'running', startedAt: new Date().toISOString(), findings: [], progress: 0 },
+      ...prev,
+    ])
+    setActiveScanId(id)
+    setCurrentView('findings')
+    setIsScanning(true)
+    setRealScanActive(true)
+    setSelectedFinding(null)
+    setGraphNodes([])
+    setGraphEdges([])
+    try {
+      const n = await scanPackages(id, '(host)', pkgText, pkgFormat)
+      toast.success(`${n} CVE finding${n === 1 ? '' : 's'} from ${pkgFormat} packages`)
+    } catch (e) {
+      toast.error('Package analysis failed', { description: String(e) })
+    }
+    finishScan(id, 'completed')
+  }, [pkgText, pkgFormat, newScanName, finishScan])
+
   // Keyboard: Cmd/Ctrl+K → palette; '/' → new scan; Esc → close drawer
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -798,6 +829,25 @@ function App() {
                   )}
                 </div>
                 <div className="text-[11px] text-center text-[#52525b]">In the desktop app, real tools produce actual results. In the browser, scans are simulated demo data.</div>
+
+                {isTauriEnv && (
+                  <div className="pt-6 mt-2 border-t border-[#24262f]">
+                    <div className="text-xs uppercase tracking-widest mb-2 text-[#52525b]">Authenticated — installed-package analysis</div>
+                    <p className="text-[11px] text-[#71717a] mb-2">
+                      Paste a host's installed-package list to match it against the CVE store (no network scan). Get it with
+                      <span className="font-mono text-[10px]"> dpkg -l</span>,<span className="font-mono text-[10px]"> rpm -qa</span>, or one <span className="font-mono text-[10px]">name version</span> per line.
+                    </p>
+                    <textarea className="input font-mono h-24 text-xs" value={pkgText} onChange={(e) => setPkgText(e.target.value)} placeholder="ii  openssl  1.0.1f-1ubuntu2  amd64  ..." />
+                    <div className="flex items-center gap-2 mt-2">
+                      <select className="input w-32 text-xs h-8" value={pkgFormat} onChange={(e) => setPkgFormat(e.target.value)}>
+                        <option value="dpkg">dpkg -l</option>
+                        <option value="rpm">rpm -qa</option>
+                        <option value="generic">name version</option>
+                      </select>
+                      <button onClick={analyzePackages} className="btn btn-secondary text-xs">Analyze packages for CVEs</button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

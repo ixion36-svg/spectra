@@ -100,6 +100,12 @@ export function updateKevFeed(): Promise<number> {
   return invoke<number>('update_kev_feed')
 }
 
+/** Authenticated-scan analysis: match an installed-package list against the CVE
+ *  store, emitting CVE findings. `format` is 'dpkg' | 'rpm' | 'generic'. */
+export function scanPackages(scanId: string, asset: string, packages: string, format: string): Promise<number> {
+  return invoke<number>('scan_packages', { scanId, asset, packages, format })
+}
+
 export function cancelRealScan(scanId: string): Promise<void> {
   return invoke<void>('cancel_real_scan', { scanId })
 }
