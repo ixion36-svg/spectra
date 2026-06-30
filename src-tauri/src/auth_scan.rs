@@ -85,6 +85,51 @@ pub fn parse_packages(text: &str, format: PkgFormat) -> Vec<(String, String)> {
     out
 }
 
+// ── SSH transport (key-based, via the system ssh client) ─────────────────────
+// Spectra shells out to the OS `ssh` (built into Windows/macOS/Linux) rather
+// than bundling an SSH library: no extra dependency, the hardened system client,
+// and BatchMode so it never blocks on a prompt. v1 is key-based auth.
+
+/// Remote command that prints the installed-package list on Debian or RHEL hosts.
+pub const ENUM_COMMAND: &str = "dpkg -l 2>/dev/null || rpm -qa 2>/dev/null";
+
+/// Build the argv for `ssh` to run `command` on a host with key-based auth.
+pub fn build_ssh_args(host: &str, port: u16, user: &str, key_path: Option<&str>, command: &str) -> Vec<String> {
+    let mut a = vec![
+        "-o".into(), "BatchMode=yes".into(), // never prompt; fail instead of hanging
+        "-o".into(), "StrictHostKeyChecking=accept-new".into(),
+        "-o".into(), "ConnectTimeout=10".into(),
+        "-p".into(), port.to_string(),
+    ];
+    if let Some(k) = key_path {
+        if !k.is_empty() {
+            a.push("-i".into());
+            a.push(k.to_string());
+        }
+    }
+    a.push(format!("{}@{}", user, host));
+    a.push(command.to_string());
+    a
+}
+
+/// Guess the package format from the enumeration output.
+pub fn detect_format(output: &str) -> PkgFormat {
+    if output.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("ii ") || t.starts_with("Desired=") || t.starts_with("rc ")
+    }) {
+        PkgFormat::Dpkg
+    } else if output.lines().any(|l| {
+        let l = l.trim();
+        (l.ends_with(".x86_64") || l.ends_with(".noarch") || l.ends_with(".aarch64") || l.contains(".el"))
+            && l.matches('-').count() >= 2
+    }) {
+        PkgFormat::Rpm
+    } else {
+        PkgFormat::Generic
+    }
+}
+
 /// Match every parsed package against the CVE store, returning finding payloads
 /// (deduped by CVE id across packages).
 pub fn package_cve_findings(conn: &Connection, packages: &[(String, String)], asset: &str) -> Vec<serde_json::Value> {
@@ -158,6 +203,26 @@ mod tests {
         assert!(cves.contains(&"CVE-2021-41773".to_string())); // apache2 -> http_server 2.4.49
         // all are KEV-flagged
         assert!(findings.iter().all(|f| f["tags"].as_array().unwrap().iter().any(|t| t == "kev")));
+    }
+
+    #[test]
+    fn builds_ssh_args_keybased_and_safe() {
+        let a = build_ssh_args("10.0.0.5", 2222, "scanner", Some("/keys/id_ed25519"), ENUM_COMMAND);
+        assert!(a.windows(2).any(|w| w == ["-o", "BatchMode=yes"])); // never hang on a prompt
+        assert!(a.windows(2).any(|w| w == ["-p", "2222"]));
+        assert!(a.windows(2).any(|w| w == ["-i", "/keys/id_ed25519"]));
+        assert!(a.contains(&"scanner@10.0.0.5".to_string()));
+        assert_eq!(a.last().unwrap(), ENUM_COMMAND);
+        // no key -> no -i
+        let b = build_ssh_args("h", 22, "u", None, "x");
+        assert!(!b.iter().any(|s| s == "-i"));
+    }
+
+    #[test]
+    fn detects_package_format() {
+        assert_eq!(detect_format("Desired=Unknown\nii  openssl  1.0.1f  amd64"), PkgFormat::Dpkg);
+        assert_eq!(detect_format("openssl-1.0.1f-7.el7.x86_64\nbash-5.0-1.el7.x86_64"), PkgFormat::Rpm);
+        assert_eq!(detect_format("nginx 1.25.2\nopenssl 1.0.1f"), PkgFormat::Generic);
     }
 
     #[test]

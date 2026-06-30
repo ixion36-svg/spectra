@@ -936,6 +936,54 @@ async fn scan_packages(
     Ok(n)
 }
 
+/// Authenticated SSH scan (key-based): log into a host via the system ssh
+/// client, enumerate installed packages, match them against the CVE store, and
+/// emit CVE findings. Credentials are used for this call only — never stored.
+#[tauri::command]
+async fn authenticated_ssh_scan(
+    app: tauri::AppHandle,
+    scan_id: String,
+    host: String,
+    port: Option<u16>,
+    user: String,
+    key_path: Option<String>,
+    db: tauri::State<'_, Db>,
+) -> Result<usize, String> {
+    validate_target(&host)?;
+    let user = user.trim().to_string();
+    if user.is_empty() || user.contains(|c: char| c.is_whitespace() || c == '@') || user.starts_with('-') {
+        return Err("invalid SSH user".into());
+    }
+    let port = port.unwrap_or(22);
+    let args = auth_scan::build_ssh_args(&host, port, &user, key_path.as_deref(), auth_scan::ENUM_COMMAND);
+
+    let output = TokioCommand::new("ssh")
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("failed to run ssh (is it installed?): {}", e))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ssh failed: {}", err.lines().next().unwrap_or("connection or auth error")));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let fmt = auth_scan::detect_format(&stdout);
+    let packages = auth_scan::parse_packages(&stdout, fmt);
+    let asset = format!("{}@{}", user, host);
+    let findings = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        auth_scan::package_cve_findings(&conn, &packages, &asset)
+    };
+    let n = findings.len();
+    for data in findings {
+        let _ = app.emit("scan-event", ScanEvent { scan_id: scan_id.clone(), event_type: "finding".into(), data });
+    }
+    Ok(n)
+}
+
 /// Match a detected service banner against the CVE store and emit a finding per
 /// CVE (KEV-flagged) onto the scan-event stream. Returns the number emitted.
 #[tauri::command]
@@ -1251,6 +1299,7 @@ pub fn run() {
             update_kev_feed,
             cve_scan_banner,
             scan_packages,
+            authenticated_ssh_scan,
             cancel_real_scan,
         ])
         .run(tauri::generate_context!())

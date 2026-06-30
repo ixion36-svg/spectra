@@ -17,7 +17,7 @@ import {
   isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative, deleteScan as deleteScanNative,
   tcpPortScan, runExternalScan, httpProbe, cveScanBanner, cancelRealScan, ollamaGenerateStream, ollamaModels as ollamaModelsNative, listenScanEvents,
   listPlugins, runPluginChecks, type PluginInfo,
-  cveStats, matchServiceCves, updateKevFeed, scanPackages, type CveMatch,
+  cveStats, matchServiceCves, updateKevFeed, scanPackages, authenticatedSshScan, type CveMatch,
 } from './lib/tauri'
 // Lazy-loaded: @xyflow/react is heavy and only needed on the Attack Graph view,
 // so it loads on demand instead of bloating the initial bundle.
@@ -124,6 +124,11 @@ function App() {
   // Authenticated-scan (paste installed packages) state.
   const [pkgText, setPkgText] = useState('')
   const [pkgFormat, setPkgFormat] = useState('dpkg')
+  // Authenticated SSH scan state (credentials used per-scan, never stored).
+  const [sshHost, setSshHost] = useState('')
+  const [sshUser, setSshUser] = useState('')
+  const [sshPort, setSshPort] = useState('22')
+  const [sshKey, setSshKey] = useState('')
   const [useRealEngine, setUseRealEngine] = useState(true)
   const [realScanActive, setRealScanActive] = useState(false)
   const realScanActiveRef = useRef(false)
@@ -597,6 +602,33 @@ function App() {
     finishScan(id, 'completed')
   }, [pkgText, pkgFormat, newScanName, finishScan])
 
+  const runSshScan = useCallback(async () => {
+    if (!sshHost.trim() || !sshUser.trim()) {
+      toast.error('Host and user are required')
+      return
+    }
+    const id = 'scan_' + Date.now().toString(36)
+    setScans((prev) => [
+      { id, name: newScanName || `Authenticated scan: ${sshUser}@${sshHost}`, targets: [`${sshUser}@${sshHost}`], profile: 'Authenticated (SSH)', status: 'running', startedAt: new Date().toISOString(), findings: [], progress: 0 },
+      ...prev,
+    ])
+    setActiveScanId(id)
+    setCurrentView('findings')
+    setIsScanning(true)
+    setRealScanActive(true)
+    setSelectedFinding(null)
+    setGraphNodes([])
+    setGraphEdges([])
+    toast('SSH scan started', { description: `${sshUser}@${sshHost} — enumerating packages` })
+    try {
+      const n = await authenticatedSshScan(id, sshHost.trim(), sshUser.trim(), Number(sshPort) || 22, sshKey.trim() || undefined)
+      toast.success(`${n} CVE finding${n === 1 ? '' : 's'} from ${sshHost}`)
+    } catch (e) {
+      toast.error('SSH scan failed', { description: String(e) })
+    }
+    finishScan(id, 'completed')
+  }, [sshHost, sshUser, sshPort, sshKey, newScanName, finishScan])
+
   // Keyboard: Cmd/Ctrl+K → palette; '/' → new scan; Esc → close drawer
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -846,6 +878,16 @@ function App() {
                       </select>
                       <button onClick={analyzePackages} className="btn btn-secondary text-xs">Analyze packages for CVEs</button>
                     </div>
+
+                    <div className="text-[10px] uppercase tracking-widest mt-5 mb-2 text-[#52525b]">…or scan a host over SSH (key-based)</div>
+                    <div className="grid grid-cols-12 gap-2">
+                      <input className="input col-span-5 text-xs font-mono" value={sshHost} onChange={(e) => setSshHost(e.target.value)} placeholder="host / IP" />
+                      <input className="input col-span-4 text-xs font-mono" value={sshUser} onChange={(e) => setSshUser(e.target.value)} placeholder="user" />
+                      <input className="input col-span-3 text-xs font-mono" value={sshPort} onChange={(e) => setSshPort(e.target.value)} placeholder="22" />
+                      <input className="input col-span-9 text-xs font-mono" value={sshKey} onChange={(e) => setSshKey(e.target.value)} placeholder="private key path (optional; uses ssh-agent / default key otherwise)" />
+                      <button onClick={runSshScan} className="btn btn-secondary text-xs col-span-3 whitespace-nowrap">Run SSH scan</button>
+                    </div>
+                    <div className="text-[10px] text-[#52525b] mt-1.5">Logs in with your SSH key (no prompt), runs <span className="font-mono">dpkg -l</span>/<span className="font-mono">rpm -qa</span>, and CVE-matches every package. Credentials are used for this scan only — never stored.</div>
                   </div>
                 )}
               </div>

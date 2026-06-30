@@ -106,6 +106,18 @@ export function scanPackages(scanId: string, asset: string, packages: string, fo
   return invoke<number>('scan_packages', { scanId, asset, packages, format })
 }
 
+/** Authenticated SSH scan (key-based): log in, enumerate packages, CVE-match.
+ *  Credentials are used for this call only and never stored. */
+export function authenticatedSshScan(
+  scanId: string,
+  host: string,
+  user: string,
+  port?: number,
+  keyPath?: string,
+): Promise<number> {
+  return invoke<number>('authenticated_ssh_scan', { scanId, host, user, port: port ?? null, keyPath: keyPath || null })
+}
+
 export function cancelRealScan(scanId: string): Promise<void> {
   return invoke<void>('cancel_real_scan', { scanId })
 }
