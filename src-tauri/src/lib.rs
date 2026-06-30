@@ -845,6 +845,27 @@ async fn import_kev_feed(json: String, db: tauri::State<'_, Db>) -> Result<usize
     vuln_db::import_kev_json(&mut conn, &json)
 }
 
+/// Match a detected service banner against the CVE store and emit a finding per
+/// CVE (KEV-flagged) onto the scan-event stream. Returns the number emitted.
+#[tauri::command]
+async fn cve_scan_banner(
+    app: tauri::AppHandle,
+    scan_id: String,
+    asset: String,
+    banner: String,
+    db: tauri::State<'_, Db>,
+) -> Result<usize, String> {
+    let findings = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        vuln_db::banner_cve_findings(&conn, &banner, &asset)
+    };
+    let n = findings.len();
+    for data in findings {
+        let _ = app.emit("scan-event", ScanEvent { scan_id: scan_id.clone(), event_type: "finding".into(), data });
+    }
+    Ok(n)
+}
+
 /// List the YAML check plugins currently installed in the app's plugins dir.
 #[tauri::command]
 async fn list_plugins(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
@@ -1136,6 +1157,7 @@ pub fn run() {
             match_service_cves,
             import_cve_feed,
             import_kev_feed,
+            cve_scan_banner,
             cancel_real_scan,
         ])
         .run(tauri::generate_context!())

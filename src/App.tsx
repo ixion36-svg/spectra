@@ -15,7 +15,7 @@ import { dedupeFindings } from './lib/dedup'
 import { exportFindings as exportFindingsFile, type ExportFormat } from './lib/export'
 import {
   isTauriEnv, detectInstalledTools, loadScans as loadScansNative, saveScan as saveScanNative, deleteScan as deleteScanNative,
-  tcpPortScan, runExternalScan, httpProbe, cancelRealScan, ollamaGenerateStream, ollamaModels as ollamaModelsNative, listenScanEvents,
+  tcpPortScan, runExternalScan, httpProbe, cveScanBanner, cancelRealScan, ollamaGenerateStream, ollamaModels as ollamaModelsNative, listenScanEvents,
   listPlugins, runPluginChecks, type PluginInfo,
 } from './lib/tauri'
 // Lazy-loaded: @xyflow/react is heavy and only needed on the Attack Graph view,
@@ -328,6 +328,9 @@ function App() {
                   source: 'rust-http',
                 }
                 setScans((prev) => prev.map((s) => (s.id === id ? { ...s, findings: [...(s.findings || []), f] } : s)))
+                // Match the server banner against the CVE store; CVE findings
+                // (KEV-flagged) stream back via the scan-event listener.
+                cveScanBanner(id, target, String(probe.server)).catch(() => {})
               })
               .catch(() => {}),
           )
