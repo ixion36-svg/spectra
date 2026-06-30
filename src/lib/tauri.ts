@@ -75,6 +75,31 @@ export function cveScanBanner(scanId: string, asset: string, banner: string): Pr
   return invoke<number>('cve_scan_banner', { scanId, asset, banner })
 }
 
+export interface CveMatch {
+  cve_id: string
+  product: string
+  cvss?: number | null
+  severity?: string | null
+  summary?: string | null
+  known_exploited: boolean
+  ransomware: boolean
+}
+
+/** CVE store stats: how many CVE rows + KEV entries are loaded. */
+export function cveStats(): Promise<{ cve_rows: number; kev_entries: number }> {
+  return invoke<{ cve_rows: number; kev_entries: number }>('cve_stats')
+}
+
+/** Look up CVEs for a product + version against the local store. */
+export function matchServiceCves(product: string, version: string): Promise<CveMatch[]> {
+  return invoke<CveMatch[]>('match_service_cves', { product, version })
+}
+
+/** Fetch + import the latest CISA KEV catalog. Returns entries loaded. */
+export function updateKevFeed(): Promise<number> {
+  return invoke<number>('update_kev_feed')
+}
+
 export function cancelRealScan(scanId: string): Promise<void> {
   return invoke<void>('cancel_real_scan', { scanId })
 }

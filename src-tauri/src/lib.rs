@@ -845,6 +845,26 @@ async fn import_kev_feed(json: String, db: tauri::State<'_, Db>) -> Result<usize
     vuln_db::import_kev_json(&mut conn, &json)
 }
 
+/// Fetch the latest CISA KEV catalog (single free JSON, no API key) and import it.
+/// Returns the number of entries loaded.
+#[tauri::command]
+async fn update_kev_feed(db: tauri::State<'_, Db>) -> Result<usize, String> {
+    const KEV_URL: &str = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .user_agent("Spectra/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(KEV_URL).send().await.map_err(|e| format!("KEV fetch failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("KEV feed returned HTTP {}", resp.status().as_u16()));
+    }
+    let json = resp.text().await.map_err(|e| e.to_string())?;
+    // No await is held across the lock below.
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    vuln_db::import_kev_json(&mut conn, &json)
+}
+
 /// Match a detected service banner against the CVE store and emit a finding per
 /// CVE (KEV-flagged) onto the scan-event stream. Returns the number emitted.
 #[tauri::command]
@@ -1157,6 +1177,7 @@ pub fn run() {
             match_service_cves,
             import_cve_feed,
             import_kev_feed,
+            update_kev_feed,
             cve_scan_banner,
             cancel_real_scan,
         ])
