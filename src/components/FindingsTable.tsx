@@ -75,6 +75,14 @@ export function FindingsTable({
                 >
                   <div><SeverityBadge sev={f.severity} /></div>
                   <div className="font-medium text-white truncate flex items-center gap-1.5" title={f.title}>
+                    {f.tags?.includes('kev') && (
+                      <span
+                        className="shrink-0 text-[9px] font-bold px-1.5 py-px rounded bg-[#ef4444] text-white tracking-wide"
+                        title={f.tags?.includes('ransomware') ? 'CISA KEV - actively exploited (ransomware-linked)' : 'CISA KEV - actively exploited in the wild'}
+                      >
+                        {f.tags?.includes('ransomware') ? 'KEV-R' : 'KEV'}
+                      </span>
+                    )}
                     <span className="truncate">{f.title}</span>
                     {f.duplicates ? (
                       <span className="shrink-0 text-[10px] font-mono px-1.5 py-px rounded bg-[#24262f] text-[#a1a1aa]" title={`${f.duplicates} duplicate${f.duplicates > 1 ? 's' : ''} collapsed`}>

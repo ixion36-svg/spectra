@@ -69,6 +69,12 @@ export function httpProbe(target: string): Promise<Record<string, unknown>> {
   return invoke<Record<string, unknown>>('http_probe', { target })
 }
 
+/** Match a service banner against the CVE store; emits a finding per CVE onto
+ *  the scan-event stream. Returns the number emitted. */
+export function cveScanBanner(scanId: string, asset: string, banner: string): Promise<number> {
+  return invoke<number>('cve_scan_banner', { scanId, asset, banner })
+}
+
 export function cancelRealScan(scanId: string): Promise<void> {
   return invoke<void>('cancel_real_scan', { scanId })
 }

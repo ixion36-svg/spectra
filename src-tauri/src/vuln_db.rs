@@ -187,6 +187,103 @@ pub fn cve_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM cve", [], |r| r.get(0))
 }
 
+// ── Banner → CVE auto-detection ──────────────────────────────────────────────
+// Turn a service banner (e.g. an HTTP `Server` header or nmap -sV product
+// string) into CVE findings. Banner product names differ from CPE product
+// names, so we normalize the common ones.
+
+fn normalize_product(token: &str) -> Vec<String> {
+    match token.to_lowercase().as_str() {
+        "apache" | "httpd" | "apache-httpd" => vec!["http_server".into()],
+        "nginx" => vec!["nginx".into()],
+        "openssh" => vec!["openssh".into()],
+        "openssl" => vec!["openssl".into()],
+        "lighttpd" => vec!["lighttpd".into()],
+        "microsoft-iis" | "iis" => vec!["internet_information_services".into()],
+        "tomcat" | "apache-coyote" => vec!["tomcat".into()],
+        "envoy" => vec!["envoy".into()],
+        "uvicorn" => vec!["uvicorn".into()],
+        "node" | "node.js" => vec!["node.js".into()],
+        other => vec![other.to_string()],
+    }
+}
+
+/// Extract candidate (product, version) pairs from a banner string. Handles
+/// `Apache/2.4.49 (Unix)`, `nginx/1.25.2`, `OpenSSH_8.5`, `Microsoft-IIS/10.0`.
+pub fn parse_banner(banner: &str) -> Vec<(String, String)> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"([A-Za-z][A-Za-z\-.]*?)[/_ ]v?(\d+\.\d+(?:\.\d+)?[A-Za-z]?)").unwrap()
+    });
+    let mut out = Vec::new();
+    for cap in re.captures_iter(banner) {
+        let version = cap[2].to_string();
+        for p in normalize_product(&cap[1]) {
+            out.push((p, version.clone()));
+        }
+    }
+    out
+}
+
+fn exploit_score(m: &CveMatch) -> u64 {
+    if m.ransomware {
+        return 95;
+    }
+    if m.known_exploited {
+        return 90;
+    }
+    match m.cvss {
+        Some(c) if c >= 9.0 => 80,
+        Some(c) if c >= 7.0 => 65,
+        Some(c) if c >= 4.0 => 45,
+        _ => 30,
+    }
+}
+
+/// Match a banner against the CVE store and produce Spectra finding payloads
+/// (same shape the `scan-event` `finding` listener consumes). Deduped by CVE id.
+pub fn banner_cve_findings(conn: &Connection, banner: &str, asset: &str) -> Vec<serde_json::Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (product, version) in parse_banner(banner) {
+        for m in match_cves(conn, &product, &version).unwrap_or_default() {
+            if !seen.insert(m.cve_id.clone()) {
+                continue;
+            }
+            let mut tags = vec!["cve".to_string(), "sca".to_string()];
+            if m.known_exploited {
+                tags.push("kev".into());
+            }
+            if m.ransomware {
+                tags.push("ransomware".into());
+            }
+            let recommendation = if m.known_exploited {
+                "Actively exploited in the wild (CISA KEV) - patch immediately."
+            } else {
+                "Upgrade the affected component to a fixed version."
+            };
+            out.push(serde_json::json!({
+                "source": "cve",
+                "title": format!("{} in {} {}", m.cve_id, product, version),
+                "severity": m.severity.clone().unwrap_or_else(|| "medium".into()),
+                "asset": asset,
+                "evidence": format!(
+                    "Service banner '{} {}' matches {}{}",
+                    product, version, m.cve_id,
+                    if m.known_exploited { " - in CISA KEV (actively exploited)" } else { "" }
+                ),
+                "description": m.summary.clone().unwrap_or_default(),
+                "recommendation": recommendation,
+                "tags": tags,
+                "cve": [m.cve_id],
+                "exploitability": exploit_score(&m),
+            }));
+        }
+    }
+    out
+}
+
 // ── NVD import ───────────────────────────────────────────────────────────────
 // Parses the NVD CVE API 2.0 / feed shape:
 //   { "vulnerabilities": [ { "cve": { "id", "descriptions":[{lang,value}],
@@ -529,6 +626,36 @@ mod tests {
         assert_eq!(kev_count(&conn).unwrap(), 5);
         let m = match_cves(&conn, "http_server", "2.4.49").unwrap();
         assert!(m.iter().all(|c| c.known_exploited)); // both Apache CVEs are in KEV
+    }
+
+    #[test]
+    fn parses_banners_into_product_version() {
+        assert_eq!(parse_banner("Apache/2.4.49 (Unix)"), vec![("http_server".into(), "2.4.49".into())]);
+        assert_eq!(parse_banner("nginx/1.25.2"), vec![("nginx".into(), "1.25.2".into())]);
+        assert_eq!(parse_banner("SSH-2.0-OpenSSH_8.5"), vec![("openssh".into(), "8.5".into())]);
+        assert_eq!(parse_banner("Microsoft-IIS/10.0"), vec![("internet_information_services".into(), "10.0".into())]);
+        assert!(parse_banner("uvicorn").is_empty()); // no version -> no match
+    }
+
+    #[test]
+    fn banner_findings_carry_kev_and_boosted_exploitability() {
+        let mut conn = mem();
+        seed_known_cves(&mut conn).unwrap();
+        let f = banner_cve_findings(&conn, "Apache/2.4.49 (Unix)", "10.0.0.1:443");
+        assert_eq!(f.len(), 2); // CVE-2021-41773 + CVE-2021-42013, deduped
+        let top = &f[0];
+        assert_eq!(top["source"], "cve");
+        assert_eq!(top["asset"], "10.0.0.1:443");
+        let tags: Vec<&str> = top["tags"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        assert!(tags.contains(&"kev"));
+        assert_eq!(top["exploitability"], 90); // KEV boost
+    }
+
+    #[test]
+    fn banner_no_match_for_patched_version() {
+        let mut conn = mem();
+        seed_known_cves(&mut conn).unwrap();
+        assert!(banner_cve_findings(&conn, "Apache/2.4.58", "h").is_empty());
     }
 
     #[test]
